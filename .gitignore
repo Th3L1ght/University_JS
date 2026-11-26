@@ -1,0 +1,17 @@
+﻿# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+__MACOSX/
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Dependencies and build output
+node_modules/
