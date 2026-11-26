@@ -365,6 +365,10 @@ function drawHud(
     14,
     view.height - 12,
   );
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(143, 233, 255, 0.55)';
+  ctx.fillText('Dogfight v1.0.0', view.width - 14, view.height - 12);
+  ctx.textAlign = 'start';
   ctx.restore();
 }
 

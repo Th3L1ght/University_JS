@@ -1,60 +1,53 @@
 /**
- * Простий структурований логер: `ISO-час РІВЕНЬ повідомлення {json-поля}`.
- * Рівень 'silent' вимикає вивід (для тестів).
+ * Структурований JSON-логер на базі pino (вивід у stdout, керується LOG_LEVEL).
+ * Чутливі поля (authorization, cookie, password, token, text) автоматично приховуються.
  */
 
-const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 } as const;
-export type LogLevel = keyof typeof LEVELS;
+import pino, { type DestinationStream } from 'pino';
 
-export interface LogSink {
-  write(text: string): unknown;
-}
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent';
 
 export interface Logger {
   debug(message: string, fields?: Record<string, unknown>): void;
   info(message: string, fields?: Record<string, unknown>): void;
   warn(message: string, fields?: Record<string, unknown>): void;
   error(message: string, fields?: Record<string, unknown>): void;
+  flush?(): void;
 }
 
 export interface LoggerOptions {
   readonly level?: LogLevel;
-  readonly out?: LogSink;
-  readonly err?: LogSink;
+  readonly destination?: DestinationStream;
 }
 
-function serializeFields(fields: Record<string, unknown>): string {
-  return JSON.stringify(fields, (_key, value: unknown) =>
-    value instanceof Error
-      ? { name: value.name, message: value.message, stack: value.stack }
-      : value,
+export function createLogger({ level = 'info', destination }: LoggerOptions = {}): Logger {
+  const instance = pino(
+    {
+      level,
+      base: { service: 'dogfight-server' },
+      redact: {
+        paths: ['authorization', 'cookie', 'password', 'token', 'secret', 'chatText'],
+        censor: '[REDACTED]',
+      },
+      timestamp: pino.stdTimeFunctions.isoTime,
+    },
+    destination,
   );
-}
 
-export function createLogger({
-  level = 'info',
-  out = process.stdout,
-  err = process.stderr,
-}: LoggerOptions = {}): Logger {
-  const threshold = LEVELS[level] ?? LEVELS.info;
-
-  const write = (
-    name: Exclude<LogLevel, 'silent'>,
+  const emit = (
+    fn: (obj: Record<string, unknown>, msg: string) => void,
     message: string,
     fields?: Record<string, unknown>,
-  ) => {
-    if (LEVELS[name] < threshold) return;
-    const target = LEVELS[name] >= LEVELS.warn ? err : out;
-    const suffix = fields === undefined ? '' : ` ${serializeFields(fields)}`;
-    target.write(
-      `${new Date().toISOString()} ${name.toUpperCase().padEnd(5)} ${message}${suffix}\n`,
-    );
+  ): void => {
+    if (fields) fn(fields, message);
+    else fn({}, message);
   };
 
   return {
-    debug: (message, fields) => write('debug', message, fields),
-    info: (message, fields) => write('info', message, fields),
-    warn: (message, fields) => write('warn', message, fields),
-    error: (message, fields) => write('error', message, fields),
+    debug: (message, fields) => emit(instance.debug.bind(instance), message, fields),
+    info: (message, fields) => emit(instance.info.bind(instance), message, fields),
+    warn: (message, fields) => emit(instance.warn.bind(instance), message, fields),
+    error: (message, fields) => emit(instance.error.bind(instance), message, fields),
+    flush: () => instance.flush(),
   };
 }

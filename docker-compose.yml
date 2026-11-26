@@ -1,0 +1,40 @@
+services:
+  dogfight:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dogfight:1.0.0
+    container_name: dogfight-server
+    ports:
+      - '${PORT:-3000}:3000'
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      HOST: '0.0.0.0'
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      APP_VERSION: ${APP_VERSION:-1.0.0}
+      LOG_DIR: /app/logs
+      STATIC_DIR: /app/client/dist
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      MAX_CONNECTIONS_PER_IP: ${MAX_CONNECTIONS_PER_IP:-10}
+      MAX_ROOMS: ${MAX_ROOMS:-20}
+      MAX_PLAYERS_PER_ROOM: ${MAX_PLAYERS_PER_ROOM:-8}
+    volumes:
+      - dogfight_logs:/app/logs
+    restart: unless-stopped
+    stop_grace_period: 10s
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  dogfight_logs:

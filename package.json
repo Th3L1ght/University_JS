@@ -1,9 +1,9 @@
 {
   "name": "dogfight",
-  "version": "7.0.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Dogfight: Lab 7 - V8 Performance, Pooling, Spatial Hash, Workers, Vitest, fast-check & Playwright",
+  "description": "Dogfight v1.0.0: Real-Time Multiplayer Arena Shooter (Production Node, Docker, CI/CD, Observability, PWA)",
   "workspaces": [
     "client",
     "server",
@@ -23,6 +23,7 @@
     "test:node": "npm test --workspaces --if-present",
     "test:e2e": "playwright test",
     "loadtest": "node server/scripts/load_test.mjs",
+    "chaos": "node server/scripts/chaos_test.mjs",
     "assets:generate": "npm run assets:generate --workspace=client",
     "lint": "eslint .",
     "format": "prettier --write .",

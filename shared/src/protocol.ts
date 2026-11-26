@@ -44,6 +44,7 @@ export const CloseCode = {
   ROOM_NOT_FOUND: 4003,
   ROOM_FULL: 4004,
   SLOW_CONSUMER: 4005,
+  FORBIDDEN_ORIGIN: 4008,
 } as const;
 
 export type CloseCodeValue = (typeof CloseCode)[keyof typeof CloseCode];
@@ -324,6 +325,10 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
     jitter: z.number(),
     drop: z.number(),
   }),
+  z.object({
+    type: z.literal('shutdown'),
+    reason: z.string().optional(),
+  }),
   ServerSnapshotSchema,
 ]);
 
@@ -338,6 +343,7 @@ export const SERVER_MESSAGE_TYPES = Object.freeze([
   'error',
   'start',
   'netsim',
+  'shutdown',
   'snapshot',
 ] as const);
 

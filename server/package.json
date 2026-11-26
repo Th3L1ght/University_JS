@@ -1,6 +1,6 @@
 {
   "name": "dogfight-server",
-  "version": "6.0.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Dogfight server: TypeScript + node:http + ws, rooms, authoritative match, NDJSON logs",
@@ -16,6 +16,8 @@
   },
   "dependencies": {
     "@dogfight/shared": "*",
+    "pino": "^10.4.0",
+    "prom-client": "^15.1.3",
     "ws": "^8.18.0",
     "zod": "^4.6.7"
   }

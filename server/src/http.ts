@@ -14,6 +14,7 @@ import type { BotInfo } from './bot.ts';
 import type { ServerConfig } from './config.ts';
 import type { Logger } from './logger.ts';
 import type { MatchManagerSummary, MatchStats } from './match.ts';
+import type { MetricsCollector } from './metrics.ts';
 import { RoomError, type Room, type RoomManager } from './rooms.ts';
 
 export const MIME_TYPES: Readonly<Record<string, string>> = Object.freeze({
@@ -22,6 +23,7 @@ export const MIME_TYPES: Readonly<Record<string, string>> = Object.freeze({
   '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.ndjson': 'application/x-ndjson; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
@@ -151,6 +153,8 @@ export interface RequestContext {
   readonly config: ServerConfig;
   readonly rooms: RoomManager;
   readonly logger: Logger;
+  readonly metrics?: MetricsCollector;
+  readonly isReady?: () => { readonly ready: boolean; readonly reason?: string };
   readonly addBots?: (room: Room, count: number) => BotInfo[];
   readonly stats: () => {
     readonly connections: number;
@@ -280,6 +284,7 @@ export function createRequestHandler(
       const current = stats();
       sendJson(res, 200, {
         status: 'ok',
+        version: config.appVersion,
         uptimeSec: Math.round(process.uptime()),
         rooms: rooms.size,
         connections: current.connections,
@@ -288,6 +293,48 @@ export function createRequestHandler(
         node: process.version,
         env: config.nodeEnv,
       });
+      return;
+    }
+
+    if (pathname === '/ready') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') throw methodNotAllowed(res, 'GET, HEAD');
+      const readiness = context.isReady ? context.isReady() : { ready: true };
+      if (!readiness.ready) {
+        sendJson(res, 503, {
+          status: 'not_ready',
+          version: config.appVersion,
+          reason: readiness.reason ?? 'shutting_down',
+        });
+        return;
+      }
+      sendJson(res, 200, {
+        status: 'ready',
+        version: config.appVersion,
+        rooms: rooms.size,
+      });
+      return;
+    }
+
+    if (pathname === '/metrics') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') throw methodNotAllowed(res, 'GET, HEAD');
+      if (!context.metrics) {
+        throw new HttpError(404, 'metrics_disabled', 'метрики Prometheus не підключено');
+      }
+      const current = stats();
+      const tickP99Ms = current.matches.reduce((max, m) => Math.max(max, m.tickDurationMs.p99), 0);
+      const rendered = await context.metrics.render({
+        players: current.connections,
+        rooms: rooms.size,
+        tickP99Ms,
+      });
+      const payload = Buffer.from(rendered.body, 'utf8');
+      res.writeHead(200, {
+        'content-type': rendered.contentType,
+        'content-length': payload.length,
+        'cache-control': 'no-store',
+        ...SECURITY_HEADERS,
+      });
+      res.end(req.method === 'HEAD' ? undefined : payload);
       return;
     }
 

@@ -22,6 +22,7 @@ import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import type { ServerConfig } from './config.ts';
 import type { Logger } from './logger.ts';
 import type { Match, MatchManager } from './match.ts';
+import type { MetricsCollector, RejectionReason } from './metrics.ts';
 import { NetSim, parseNetsimParams } from './netsim.ts';
 import { TokenBucket } from './rate_limit.ts';
 import { RoomError, type Room, type RoomManager } from './rooms.ts';
@@ -55,6 +56,7 @@ export interface SendOptions {
   readonly maxBufferedBytes: number;
   readonly logger: Logger;
   readonly stats?: { dropped: number };
+  readonly metrics?: MetricsCollector;
 }
 
 export function safeSend(
@@ -68,13 +70,14 @@ export function safeSend(
 export function deliver(
   conn: SendableConn,
   data: string | ArrayBuffer | Buffer,
-  { maxBufferedBytes, logger, stats }: SendOptions,
+  { maxBufferedBytes, logger, stats, metrics }: SendOptions,
 ): 'sent' | 'dropped' | 'closed' {
   const { socket } = conn;
   if (socket.readyState !== WebSocket.OPEN) return 'closed';
 
   if (socket.bufferedAmount > maxBufferedBytes * HARD_BUFFER_FACTOR) {
-    logger.warn('slow consumer: буфер переповнений, відключаю', {
+    logger.warn('ws.rejected', {
+      reason: 'slow_consumer_hard',
       bufferedAmount: socket.bufferedAmount,
     });
     socket.terminate();
@@ -84,17 +87,17 @@ export function deliver(
     conn.dropped += 1;
     if (stats) stats.dropped += 1;
     if (conn.dropped >= MAX_DROPPED_BEFORE_DISCONNECT) {
-      logger.warn('slow consumer: забагато відкинутих повідомлень, відключаю', {
-        dropped: conn.dropped,
-      });
+      logger.warn('ws.rejected', { reason: 'slow_consumer', dropped: conn.dropped });
       socket.close(CloseCode.SLOW_CONSUMER, 'slow consumer');
       return 'closed';
     }
     return 'dropped';
   }
 
+  const outBytes = typeof data === 'string' ? Buffer.byteLength(data) : data.byteLength;
+  metrics?.recordMessage('out', outBytes);
   socket.send(data, (error) => {
-    if (error) logger.warn('помилка відправки', { error: error.message });
+    if (error) logger.warn('ws.send_error', { error: error.message });
   });
   return 'sent';
 }
@@ -131,25 +134,50 @@ export interface WsServerHandle {
   close(options?: { readonly timeoutMs?: number }): Promise<void>;
 }
 
+function isAllowedOrigin(
+  origin: string | undefined,
+  allowedOrigins: readonly string[],
+  nodeEnv: ServerConfig['nodeEnv'],
+): boolean {
+  // Порожній Origin (headless ws-клієнти, тести, локальний dev) дозволено, якщо список не заданий жорстко.
+  if (!origin) return allowedOrigins.length === 0 || nodeEnv !== 'production';
+  if (allowedOrigins.length > 0) return allowedOrigins.includes(origin);
+  // За замовчуванням дозволяємо localhost / 127.0.0.1.
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
+  }
+}
+
 export function attachWebSocketServer({
   server,
   rooms,
   matches,
   config,
   logger,
+  metrics,
 }: {
   readonly server: http.Server;
   readonly rooms: RoomManager;
   readonly matches: MatchManager;
   readonly config: ServerConfig;
   readonly logger: Logger;
+  readonly metrics?: MetricsCollector;
 }): WsServerHandle {
   const { ws: wsConfig, limits } = config;
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: wsConfig.maxPayload });
   const connections = new Set<ClientConn>();
   const byRoom = new Map<string, Set<ClientConn>>();
+  const byIp = new Map<string, number>();
   const stats = { accepted: 0, rejected: 0, dropped: 0, violations: 0, rejectedInputs: 0 };
-  const sendOptions: SendOptions = { maxBufferedBytes: wsConfig.maxBufferedBytes, logger, stats };
+  const sendOptions: SendOptions = {
+    maxBufferedBytes: wsConfig.maxBufferedBytes,
+    logger,
+    stats,
+    metrics,
+  };
 
   const send = (conn: ClientConn, message: ServerMessage) => safeSend(conn, message, sendOptions);
   const broadcast = (roomId: string, message: ServerMessage) => {
@@ -178,11 +206,14 @@ export function attachWebSocketServer({
     closeCode: CloseCodeValue,
     code: string,
     reason: string,
+    metricReason: RejectionReason = 'invalid_payload',
   ): void {
     stats.violations += 1;
-    logger.warn('порушення протоколу WebSocket', {
+    metrics?.recordRejection(metricReason);
+    logger.warn('ws.rejected', {
       conn: conn.id,
-      ip: conn.ip,
+      roomId: conn.room?.id,
+      playerId: conn.player?.id,
       code,
       reason,
       closeCode,
@@ -202,10 +233,13 @@ export function attachWebSocketServer({
 
   function leaveRoom(conn: ClientConn): void {
     if (!conn.joined || !conn.room || !conn.player) return;
+    const roomId = conn.room.id;
+    const playerId = conn.player.id;
     leaveMatch(conn);
     conn.joined = false;
-    byRoom.get(conn.room.id)?.delete(conn);
-    conn.room.leave(conn.player.id);
+    byRoom.get(roomId)?.delete(conn);
+    conn.room.leave(playerId);
+    logger.info('player.left', { roomId, playerId });
   }
 
   function handleInput(
@@ -268,10 +302,9 @@ export function attachWebSocketServer({
         conn.player = player;
         if (conn.authTimer !== null) clearTimeout(conn.authTimer);
         byRoom.get(room.id)?.add(conn);
-        logger.info('гравець приєднався', {
-          room: room.id,
+        logger.info('player.joined', {
+          roomId: room.id,
           playerId: player.id,
-          nickname: player.nickname,
         });
         send(conn, {
           type: 'welcome',
@@ -373,14 +406,26 @@ export function attachWebSocketServer({
 
   function onBinary(conn: ClientConn, buf: Buffer): void {
     if (!conn.inputBucket.take()) {
-      violate(conn, CloseCode.POLICY_VIOLATION, 'rate_limited', 'перевищено ліміт повідомлень');
+      violate(
+        conn,
+        CloseCode.POLICY_VIOLATION,
+        'rate_limited',
+        'перевищено ліміт повідомлень',
+        'rate_limit',
+      );
       return;
     }
     let message;
     try {
       message = binaryCodec.decode(buf);
     } catch {
-      violate(conn, CloseCode.UNSUPPORTED_DATA, 'binary_frame', 'некоректний бінарний кадр');
+      violate(
+        conn,
+        CloseCode.UNSUPPORTED_DATA,
+        'binary_frame',
+        'некоректний бінарний кадр',
+        'invalid_payload',
+      );
       return;
     }
     const bytes = buf.byteLength;
@@ -404,7 +449,13 @@ export function attachWebSocketServer({
       }
       case MsgType.SNAPSHOT:
       case MsgType.PONG:
-        violate(conn, CloseCode.POLICY_VIOLATION, 'unknown_type', 'неочікуваний бінарний кадр');
+        violate(
+          conn,
+          CloseCode.POLICY_VIOLATION,
+          'unknown_type',
+          'неочікуваний бінарний кадр',
+          'policy',
+        );
         return;
       default: {
         const _exhaustive: never = message;
@@ -415,18 +466,31 @@ export function attachWebSocketServer({
 
   function onMessage(conn: ClientConn, data: RawData, isBinary: boolean): void {
     const buf = rawDataToBuffer(data);
+    metrics?.recordMessage('in', buf.byteLength);
     if (isBinary) {
       onBinary(conn, buf);
       return;
     }
     const bucket = isInputFrame(buf) ? conn.inputBucket : conn.bucket;
     if (!bucket.take()) {
-      violate(conn, CloseCode.POLICY_VIOLATION, 'rate_limited', 'перевищено ліміт повідомлень');
+      violate(
+        conn,
+        CloseCode.POLICY_VIOLATION,
+        'rate_limited',
+        'перевищено ліміт повідомлень',
+        'rate_limit',
+      );
       return;
     }
     const parsed = parseClientMessage(buf, { maxBytes: wsConfig.maxPayload });
     if (!parsed.ok) {
-      violate(conn, parsed.error.closeCode, parsed.error.code, parsed.error.reason);
+      violate(
+        conn,
+        parsed.error.closeCode,
+        parsed.error.code,
+        parsed.error.reason,
+        'invalid_payload',
+      );
       return;
     }
     dispatchClientMessage(conn, parsed.data);
@@ -435,12 +499,37 @@ export function attachWebSocketServer({
   wss.on('error', (error: unknown) => logger.error('помилка WebSocketServer', { error }));
 
   wss.on('connection', (socket, request) => {
+    const origin = request.headers.origin;
+    if (!isAllowedOrigin(origin, config.allowedOrigins, config.nodeEnv)) {
+      stats.rejected += 1;
+      metrics?.recordRejection('origin');
+      logger.warn('ws.rejected', { reason: 'origin', origin });
+      socket.on('error', () => {});
+      socket.close(CloseCode.FORBIDDEN_ORIGIN, 'forbidden_origin');
+      return;
+    }
+
+    const ip = request.socket.remoteAddress ?? 'unknown';
+    const ipCount = byIp.get(ip) ?? 0;
+    if (ipCount >= limits.maxConnectionsPerIp) {
+      stats.rejected += 1;
+      metrics?.recordRejection('ip_limit');
+      logger.warn('ws.rejected', { reason: 'ip_limit', ip, count: ipCount });
+      socket.on('error', () => {});
+      socket.close(CloseCode.TRY_AGAIN_LATER, 'ip_limit');
+      return;
+    }
+
     if (connections.size >= limits.maxConnections) {
       stats.rejected += 1;
+      metrics?.recordRejection('server_full');
+      logger.warn('ws.rejected', { reason: 'server_full' });
       socket.on('error', () => {});
       socket.close(CloseCode.TRY_AGAIN_LATER, 'server_full');
       return;
     }
+
+    byIp.set(ip, ipCount + 1);
 
     const conn: ClientConn = {
       id: randomUUID().slice(0, 8),
@@ -509,6 +598,9 @@ export function attachWebSocketServer({
       if (conn.authTimer !== null) clearTimeout(conn.authTimer);
       conn.netsim.dispose();
       connections.delete(conn);
+      const nextCount = (byIp.get(ip) ?? 1) - 1;
+      if (nextCount <= 0) byIp.delete(ip);
+      else byIp.set(ip, nextCount);
       leaveRoom(conn);
     });
 
@@ -540,6 +632,7 @@ export function attachWebSocketServer({
     clearInterval(heartbeat);
     for (const conn of connections) {
       if (conn.authTimer !== null) clearTimeout(conn.authTimer);
+      send(conn, { type: 'shutdown', reason: 'server_shutting_down' });
       conn.socket.close(CloseCode.GOING_AWAY, 'server_shutting_down');
     }
     const deadline = Date.now() + timeoutMs;

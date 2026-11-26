@@ -1,7 +1,12 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { binaryCodec, MsgType, TICK_MS } from '@dogfight/shared';
+import WebSocket from 'ws';
+import { binaryCodec, CloseCode, MsgType, TICK_MS } from '@dogfight/shared';
 import { BotManager } from '../src/bot.ts';
 import { ConfigError, loadConfig } from '../src/config.ts';
+import { createApp } from '../src/index.ts';
 import { createLogger } from '../src/logger.ts';
 import { Match, MatchManager, RollingStats } from '../src/match.ts';
 import { NetSim, parseNetsimParams } from '../src/netsim.ts';
@@ -238,5 +243,82 @@ describe('Config, Rooms, RollingStats, parseNetsimParams', () => {
     vi.advanceTimersByTime(30);
     expect(called).toBe(1);
     sim.dispose();
+  });
+});
+
+describe('Production observability & hardening (Lab 8)', () => {
+  it('/health, /ready та /metrics повертають коректні статуси, версію і Prometheus-метрики', async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dogfight-obs-'));
+    const app = createApp(
+      loadConfig({
+        PORT: '0',
+        HOST: '127.0.0.1',
+        NODE_ENV: 'development',
+        LOG_DIR: tmpDir,
+        LOG_LEVEL: 'silent',
+        APP_VERSION: '1.0.0-test',
+        ALLOWED_ORIGINS: 'https://dogfight.example',
+        MAX_CONNECTIONS_PER_IP: '2',
+      }),
+      { logger: silent },
+    );
+
+    try {
+      const address = await app.start();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      const base = `http://127.0.0.1:${port}`;
+      const wsUrl = `ws://127.0.0.1:${port}/ws`;
+
+      const healthRes = await fetch(`${base}/health`);
+      expect(healthRes.status).toBe(200);
+      const health: unknown = await healthRes.json();
+      expect(health).toMatchObject({ status: 'ok', version: '1.0.0-test' });
+
+      const readyRes = await fetch(`${base}/ready`);
+      expect(readyRes.status).toBe(200);
+      const ready: unknown = await readyRes.json();
+      expect(ready).toMatchObject({ status: 'ready', version: '1.0.0-test' });
+
+      // Заборонений Origin -> 4008
+      const badOriginCode = await new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(wsUrl, { headers: { origin: 'https://evil.example' } });
+        ws.once('close', (code) => resolve(code));
+        ws.once('error', reject);
+      });
+      expect(badOriginCode).toBe(CloseCode.FORBIDDEN_ORIGIN);
+
+      // Перевірка ліміту MAX_CONNECTIONS_PER_IP = 2 (третє з'єднання отримує 1013)
+      const openWs = () =>
+        new Promise<WebSocket>((resolve, reject) => {
+          const ws = new WebSocket(wsUrl, { headers: { origin: 'https://dogfight.example' } });
+          ws.once('open', () => resolve(ws));
+          ws.once('error', reject);
+        });
+      const c1 = await openWs();
+      const c2 = await openWs();
+      const thirdCode = await new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(wsUrl, { headers: { origin: 'https://dogfight.example' } });
+        ws.once('close', (code) => resolve(code));
+        ws.once('error', reject);
+      });
+      expect(thirdCode).toBe(CloseCode.TRY_AGAIN_LATER);
+
+      // Prometheus /metrics містить ключові метрики та лічильники відхилень
+      const metricsRes = await fetch(`${base}/metrics`);
+      expect(metricsRes.status).toBe(200);
+      const body = await metricsRes.text();
+      expect(body).toContain('dogfight_players_connected 2');
+      expect(body).toContain('dogfight_rooms_active 0');
+      expect(body).toContain('dogfight_event_loop_utilization');
+      expect(body).toContain('dogfight_process_rss_bytes');
+      expect(body).toContain('dogfight_ws_rejected_total{reason="origin"} 1');
+      expect(body).toContain('dogfight_ws_rejected_total{reason="ip_limit"} 1');
+
+      c1.close();
+      c2.close();
+    } finally {
+      await app.shutdown('test');
+      await rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });

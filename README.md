@@ -1,142 +1,179 @@
-# Dogfight - Лабораторна робота №7: Engines, Memory, and Tests (V8 Performance, Pooling, Spatial Hash, Workers & Testing)
+# Dogfight (`v1.0.0`)
 
-![CI](https://img.shields.io/badge/CI-typecheck%20%7C%20lint%20%7C%20vitest%20%7C%20build%20%7C%20playwright-brightgreen)
+Багатокористувацький 2D arena-shooter у реальному часі з авторитативним Node.js-сервером, клієнтським передбаченням і узгодженням (prediction & reconciliation), бінарним мережевим протоколом (`ArrayBuffer` + `DataView`), суворим TypeScript, оптимізацією гарячих шляхів V8 (`SpatialHash`, `ObjectPool`, Web Worker), Prometheus-метриками, Docker-контейнеризацією та PWA.
 
-Сьомий етап гри Dogfight: професійний тестовий контур (**Vitest + V8 coverage + fast-check + Playwright**),
-інструментування продуктивності (`performance.mark`/`measure`, `p50`/`p95`/`p99`, `eventLoopUtilization`),
-оптимізація гарячих шляхів (**Object Pooling + Spatial Hash Grid $O(n)$ + стабільні V8 Hidden Classes**),
-**Web Worker із Transferable `Float32Array`** (з автоматичним fallback на `file://`), серверні ШІ-боти та
-навантажувальне тестування.
+---
 
-## Швидкий старт і команди
+## Швидкий старт
+
+### Локальний запуск (3 команди)
 
 ```bash
-npm install               # встановлення залежностей (Vitest, fast-check, Playwright, Zod, TS)
-npm run typecheck         # tsc --noEmit по всіх 3 workspaces
-npm run lint              # ESLint + @typescript-eslint/no-floating-promises + no-explicit-any
-npm run format:check      # Prettier
-npm test                  # 62 unit & property-based тести (Vitest)
-npm run test:coverage     # Vitest + @vitest/coverage-v8 (покриття shared/ ≥ 85%)
-npm run test:node         # додаткові інтеграційні node:test (HTTP, WS, NDJSON, Lobby)
-npm run build             # збірка клієнта Vite у client/dist (base: './', сумісно з file://)
-npm run test:e2e          # Playwright E2E (2 браузерні контексти проти реального сервера)
-npm run loadtest          # навантажувальний тест N = 8, 32, 64, 128 клієнтів
+npm ci
+npm run build
+npm start
 ```
 
-## Тестова архітектура
+Відкрийте `http://127.0.0.1:3000`. Для режиму розробки з Vite HMR: `npm run dev`.
 
-1. **Unit-тести (Vitest, `shared/test/sim.spec.ts`, `server/test/server.spec.ts`, `client/test/client.spec.ts`):**
-   - Математика `Vector2` (незмінність), `integrate`, `wrapAngle` / `wrappedDelta`.
-   - Граничні випадки колізій: дотик (`tangent`), перетин (`overlap`), промах (`miss`), перетин через край арени, тунелювання швидких куль та еквівалентність `SpatialHashGrid` $O(n)$ до еталонного $O(n^2)$.
-   - `ObjectPool` (перевикористання, `maxSize`, `world.poolStats`), детермінізм `World.step` (1000 кроків), `World.fromSnapshot`.
-   - `TokenBucket`, `BotManager`, `NetClient` reconciliation + interpolation, `Bus<GameEvents>`, та **фейкові таймери (`vi.useFakeTimers()`)** для акумулятора `createLoop`, 30 Гц `Match`, `NetSim`, `RoomManager` TTL і heartbeat.
-2. **Property-based тести (`fast-check`, `shared/test/properties.spec.ts`, 5 властивостей):**
-   - Round-trip бінарного кодека `decode(encode(msg))` у межах точності квантування `Int16` (`≤ 0.0005` рад, `≤ 0.05` пкс/с).
-   - Точна відповідність `encode(msg).byteLength` формулі бінарної специфікації.
-   - Довільні биті буфери `Uint8Array` (300 прогонів) викликають лише `BinaryFormatError` без падіння процесу.
-   - Корабель не покидає межі арени `[0, 1280) × [0, 720)` за 1000 випадкових кроків.
-   - `parseClientMessage` приймає згенеровані валідні повідомлення й відхиляє невалідні мутації (чужа версія, зайві поля).
-3. **E2E-тест (`e2e/multiplayer.spec.ts`, `playwright.config.ts`):**
-   - Автоматично піднімає сервер (`webServer`), відкриває два незалежні контексти Chromium, заводить обох гравців у одну кімнату, перевіряє `roster`, чат, старт матчу та керування кораблем із підтвердженням оновлення стану `< 500` мс.
-4. **Покриття `@dogfight/shared` (`@vitest/coverage-v8`):** **94.48% statements | 96.35% functions | 96.86% lines** (поріг ≥ 85% закріплений у `vitest.config.ts` і CI).
+### Запуск у Docker
 
-## Профілювання та оптимізація: До і Після
+```bash
+docker compose up --build
+```
 
-Виміряно на цій машині (Node.js v26.13.1, V8) на сцені активного бою (16 гравців / 81 сутність, 600 тіків, та важка сцена 64 гравці / 207 сутностей, 300 тіків):
+Сервер піднімається на `http://127.0.0.1:3000` з `HEALTHCHECK` на `/health`, персистентним томом логів `dogfight_logs` і коректним `SIGTERM` shutdown.
 
-| Метрика                                      | До оптимізації ($O(n^2)$, без пулів) | Після оптимізації (Spatial Hash $O(n)$ + `ObjectPool`) |                  Зміна |
-| -------------------------------------------- | -----------------------------------: | -----------------------------------------------------: | ---------------------: |
-| `World.step` p50 (16 гравців)                |                             0.102 мс |                                           **0.062 мс** |               **−39%** |
-| `World.step` p95 (16 гравців)                |                             0.396 мс |                                           **0.343 мс** |               **−13%** |
-| `World.step` p99 (16 гравців)                |                             0.706 мс |                                           **0.582 мс** |               **−18%** |
-| Колізії p50 / p99 (16 гравців, 81 сутність)  |                     0.054 / 0.215 мс |                                   **0.017 / 0.084 мс** | **3.2× / 2.6× швидше** |
-| Колізії p50 / p99 (64 гравці, 207 сутностей) |                     0.358 / 0.478 мс |                                   **0.053 / 0.087 мс** | **6.8× / 5.5× швидше** |
-| Алокації `Bullet` (600 тіків, 16 гравців)    |                 1 406 нових об'єктів |                       **81 алокація (94.2% recycled)** |    **−94.2% алокацій** |
-| Алокації `Explosion` (600 тіків, 16 гравців) |                    292 нових об'єкти |                       **41 алокація (86.0% recycled)** |    **−86.0% алокацій** |
+### Автономний офлайн-режим (`file://`)
 
-- **Топ-аллокатори до оптимізації**: створення нових `Bullet`, масивів частинок `Explosion` і тимчасових масивів `dead[]`/`candidates[]` на кожному кроці `World.step`.
-- **Що зроблено**: перевикористовувані `ObjectPool<Bullet>` та `ObjectPool<Explosion>` (із `reset()` та фіксованим порядком полів для стабільних V8 Hidden Classes), багаторазові scratch-буфери (`#deadScratch`, `scratchCandidates`), та `SpatialHashGrid` із очищенням лише «брудних» комірок.
+Після `npm run build` клієнт (`client/dist/index.html`) зібрано з `base: './'`: його можна відкривати напряму через `file://` без вебсервера — Service Worker і Web Worker безпечно деградують, а вбудована симуляція дозволяє грати локально.
 
-## Експеримент із Web Worker (Transferable `Float32Array`)
+---
 
-Модулі `client/src/workers/particle_worker.ts` і `client/src/render/particle_bridge.ts` виносять фізику візуальних
-частинок вибухів (до 2048 частинок, 5 `float32` на частинку = 40 КБ) у фоновий Web Worker із подвійною буферизацією
-та **zero-copy передачею** `[buffer.buffer]`.
+## Керування
 
-- **Виграш на головному потоці:** при масових вибухах (500–2000 частинок) цикл інтегрування й затухання частинок повністю зникає з main thread, звільняючи бюджет 16.6 мс кадру під рендер Canvas і обробку вводу.
-- **Накладні витрати:** один `postMessage` із Transferable передає лише вказівник на `ArrayBuffer` (O(1), ~0.02–0.05 мс), але додає 1 кадр асинхронної затримки для візуальних іскор (непомітно для ока). Для малої кількості частинок (< 50) накладні витрати пересилки співмірні з розрахунком, тому виграш максимальний саме у «гарячих» боях із десятками вибухів.
-- **Офлайн-сумісність:** при відкритті `client/dist/index.html` по `file://` (де браузер блокує `new Worker` через null-origin) `createParticleSystem()` автоматично вмикає fallback у головному потоці.
+| Клавіша           | Дія                                                        |
+| ----------------- | ---------------------------------------------------------- |
+| `←` `→` / `A` `D` | Поворот корабля                                            |
+| `↑` / `W`         | Тяга вперед                                                |
+| `Пробіл`          | Стрільба (основна гармата)                                 |
+| `X` / `E`         | Ракета / спецпостріл                                       |
+| `M`               | Увімкнути / вимкнути звук                                  |
+| `Tab` / `F3`      | Netgraph (RTT, кодек JSON/Binary, емуляція втрат/затримки) |
 
-## Навантажувальне тестування (`server/scripts/load_test.mjs`)
+---
 
-Запущено на цій машині (Node.js v26.13.1, одна кімната, 30 Гц, бінарний протокол, активна стрільба й рух, 3 с на сценарій):
+## Архітектура монорепозиторію
 
-| Клієнтів (`N`) | `tick avg` (мс) | `tick p99` (мс) | `ELU` (%) | `RSS` (МБ) | Downlink (КБ/с) | Uplink (КБ/с) | У бюджеті 33.3 мс? |
-| -------------: | --------------: | --------------: | --------: | ---------: | --------------: | ------------: | :----------------: |
-|          **8** |           0.555 |           2.096 |      4.2% |       92.2 |           211.5 |           2.8 |        Так         |
-|         **32** |           1.083 |           1.654 |      8.3% |       99.3 |         2 526.0 |          11.4 |        Так         |
-|         **64** |           1.713 |           2.615 |     15.4% |      107.0 |         9 032.2 |          23.9 |        Так         |
-|        **128** |           3.177 |           4.483 |     32.3% |      139.9 |        36 404.6 |          50.7 |        Так         |
+```text
+workspace/
+├── shared/     # @dogfight/shared — чиста детермінована симуляція (30 Гц, mulberry32),
+│               # SpatialHash, ObjectPool, Zod-схеми протоколу, JSON і Binary (DataView) кодеки
+├── server/     # dogfight-server — node:http + ws, кімнати, авторитативний Match (30 Гц),
+│               # боти, NDJSON-журнали, pino JSON-логи, prom-client /metrics, /health, /ready
+├── client/     # dogfight-client — Vite + Canvas 2D + Web Audio, prediction & reconciliation,
+│               # entity interpolation, Web Worker (Float32Array Transferable), Netgraph, PWA
+├── e2e/        # Playwright E2E-тести (офлайн, мультиплеєр 2 вкладки, боти)
+├── Dockerfile  # Multi-stage node:22-alpine (< 200 MB, USER node, HEALTHCHECK)
+└── .github/workflows/ci.yml  # CI/CD: typecheck, lint, tests, chaos, Docker size gate, GHCR release
+```
 
-**Висновок щодо ємності та вузького місця:**
-Завдяки `SpatialHashGrid` $O(n)$ та `ObjectPool` сама симуляція легко витримує **128 одночасних клієнтів** в одній
-кімнаті (`tick p99 = 4.48 мс` при бюджеті `33.3 мс`, `ELU = 32.3%`, `RSS = 139.9 МБ`). Головним вузьким місцем
-масштабування в одній кімнаті є **мережева розсилка $O(N^2)$**: кожен із `N` клієнтів отримує повний знімок усіх `N`
-кораблів і їхніх куль, через що при `N = 128` вихідний трафік сягає **35.5 МБ/с** (`36 405 КБ/с`). Розрахункова
-межа однієї кімнати без Interest Management (AOI) та дельта-стиснення становить **~220–250 гравців** (насичення
-мережевої серіалізації та Event Loop).
+---
 
-## Знімок `Lab_7`
+## Production Observability & Hardening
 
-Повний знімок монорепозиторію збережено в `JavaScript_Labs/Lab_7` (включно з `e2e/`, `vitest.config.ts`,
-`playwright.config.ts`, `.github/`, `client/dist/`) без `node_modules/`, `logs/`, `coverage/`, `playwright-report/`,
-`test-results/` та `.DS_Store`.
+- **Структуровані логи (`pino`):** JSON у `stdout`, рівень керується `LOG_LEVEL` (за замовчуванням `info`), автоматичне маскування чутливих полів (`authorization`, `cookie`, `password`, `token`, `secret`, `chatText`). Логуються події `room.created`, `player.joined`, `player.left`, `ws.rejected`, `server.shutdown`, `server.fatal`.
+- **Health & Readiness probes:**
+  - `GET /health` — liveness-проба (`status: "ok"`, `version`, `uptimeSec`, `rooms`, `connections`, `tick`, `memory`).
+  - `GET /ready` — readiness-проба (`200` коли бандл клієнта готовий і сервер не вимикається; `503` під час graceful shutdown).
+- **Метрики Prometheus (`GET /metrics`):** `dogfight_players_connected`, `dogfight_rooms_active`, `dogfight_ws_messages_total`, `dogfight_ws_bytes_total`, `dogfight_tick_duration_p99_ms`, `dogfight_event_loop_utilization`, `dogfight_process_rss_bytes`, `dogfight_ws_rejected_total{reason=...}`.
+- **Захист та ліміти (`Zod`-валідація env у `server/src/config.ts`):**
+  - перевірка `Origin` при WS handshake (`ALLOWED_ORIGINS`, код закриття `4008`);
+  - обмеження з'єднань з одного IP (`MAX_CONNECTIONS_PER_IP`, код `1013`);
+  - token-bucket rate limiter на повідомлення і ввід (`4005`), валідація payload (`4003`);
+  - graceful shutdown (`SIGTERM`/`SIGINT`): `/ready` → `503`, розсилка `{ type: "shutdown" }`, закриття WS із `1001`, завершення NDJSON-журналів і `logger.flush()` за `< 5 c`; fail-fast при `uncaughtException`/`unhandledRejection` з кодом `1`.
+- **Хаос-тест (`npm run chaos`):** перевіряє флуд 1000 битими фреймами/с від атакуючого клієнта без деградації `tick p99` сусідньої кімнати та коректне завершення/перепідключення.
+
+---
+
+## Бенчмарки семестру
+
+### 1. Мережевий протокол: JSON vs Binary (`DataView`, Lab 5)
+
+_Сценарій: 4 гравці, 30 Гц снапшоти + 30 Гц інпути._
+
+| Метрика                             |        JSON | Binary (`DataView`) |         Приріст |
+| ----------------------------------- | ----------: | ------------------: | --------------: |
+| Розмір снапшота                     |     2 606 B |           **533 B** |  **4.9× менше** |
+| Розмір кадру вводу                  |       267 B |            **21 B** | **12.7× менше** |
+| Вхідний трафік (1 гравець)          |  76.35 KB/s |      **15.62 KB/s** |  **4.9× менше** |
+| Сумарний вихідний трафік (4 гравці) | 305.39 KB/s |      **62.46 KB/s** |  **4.9× менше** |
+| Час encode + decode                 |     27.7 µs |          **4.2 µs** | **6.6× швидше** |
+
+### 2. Оптимізація симуляції V8: `SpatialHash` + `ObjectPool` (Lab 7)
+
+_Сценарій: 600 тиків, порівняння O(N²) перевірки колізій без пулів проти SpatialHash + ObjectPool._
+
+| Сценарій                     | Метрика                         |      До (Before) |        Після (After) |                  Ефект |
+| ---------------------------- | ------------------------------- | ---------------: | -------------------: | ---------------------: |
+| 16 гравців (81 сутність)     | `World.step` p50 / p99          | 0.102 / 0.706 ms | **0.062 / 0.582 ms** |        **−39% / −18%** |
+| 16 гравців (81 сутність)     | Колізії p50 / p99               | 0.054 / 0.215 ms | **0.017 / 0.084 ms** | **3.2× / 2.6× швидше** |
+| 64 гравці (207 сутностей)    | Колізії p50 / p99               | 0.358 / 0.478 ms | **0.053 / 0.087 ms** | **6.8× / 5.5× швидше** |
+| Пули об'єктів (`ObjectPool`) | Перевикористання куль / вибухів |               0% |    **94.2% / 86.0%** |    мінімум GC-алокацій |
+
+### 3. Навантажувальне тестування сервера (`npm run loadtest`, Lab 7)
+
+_Сценарій: `N` підключених клієнтів в одній кімнаті, 30 Гц авторитативні снапшоти (Binary)._
+
+| Клієнтів (`N`) | Tick `p99` | Event Loop Utilization | RSS пам'ять | Вихідний трафік |
+| -------------: | ---------: | ---------------------: | ----------: | --------------: |
+|              8 |    2.10 ms |                   4.2% |     92.2 MB |      211.5 KB/s |
+|             32 |    1.65 ms |                   8.3% |     99.3 MB |      2 526 KB/s |
+|             64 |    2.62 ms |                  15.4% |    107.0 MB |      9 032 KB/s |
+|            128 |    4.48 ms |                  32.3% |    139.9 MB |     36 405 KB/s |
+
+_Вузьке місце:_ `O(N²)` розсилка повного стану кімнати кожному підключеному клієнту (прогнозована межа ~220–250 гравців в одній кімнаті до перевищення бюджету 33.3 мс).
+
+---
+
+## Known Limitations & Architecture Trade-offs
+
+- **Однопроцесна пам'ять (in-memory rooms):** стан кімнат і матчів живе в одному процесі Node.js без Redis/sticky-session кластеризації — це дає мінімальну затримку (< 5 мс `p99` на 128 гравців), але обмежує горизонтальне масштабування без зовнішнього брокера.
+- **Повні снапшоти замість delta-compression:** бінарний протокол зменшує кадр у 4.9×, проте при 128+ гравцях в одній кімнаті відсутність interest management (AOI) і delta-кодування призводить до зростання трафіку як `O(N²)`.
+- **Проста автентифікація за нікнеймом:** немає OAuth/JWT-акаунтів або персистентної бази лідербордів; реплеї пишуться в локальні NDJSON-файли (`LOG_DIR`).
+- **Node.js native TypeScript execution:** сервер запускається напряму (`node server/src/index.ts`) з використанням лише стираного синтаксису (`erasableSyntaxOnly`), що прибирає крок компіляції сервера, але вимагає Node.js `>= 22.18` (або `24+`).
+
+## What I'd Do Next
+
+1. **Delta-compression + Area of Interest (AOI):** надсилати клієнту лише змінені поля сутностей у радіусі видимості камери, щоб знизити трафік з `O(N²)` до `O(N)`.
+2. **Lag compensation (server rewind) для стрільби:** перевірка влучань за історією позицій на момент пострілу гравця з урахуванням його RTT.
+3. **Горизонтальне масштабування кімнат:** виділення matchmaker-сервісу та маршрутизація кімнат по воркерах/нодах з експортом метрик у Grafana.
+4. **Плеєр реплеїв у клієнті:** відтворення збережених NDJSON-журналів (`GET /api/replays/:id`) із таймлайном і перемотуванням.
+
+---
+
+## Еволюція проєкту (`Lab_1` — `Lab_8`)
+
+| Етап      | Ключові результати                                                                                                                                                                                                                 |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Lab 1** | Базовий ігровий цикл (fixed timestep), фізика корабля, Canvas 2D рендеринг, керування.                                                                                                                                             |
+| **Lab 2** | Сутності (кулі, астероїди, вибухи, підсилювачі), колізії, поведінки, локальний HUD.                                                                                                                                                |
+| **Lab 3** | Асинхронний завантажувач ресурсів, процедурний Web Audio, екран завантаження, лобі-UI, офлайн-сумісність.                                                                                                                          |
+| **Lab 4** | Власний сервер (`node:http` + `ws`), кімнати, чат, NDJSON-журнали матчів, graceful shutdown.                                                                                                                                       |
+| **Lab 5** | Пакет `@dogfight/shared`, авторитативний сервер 30 Гц, prediction & reconciliation, інтерполяція, бінарний кодек `DataView`, Netgraph.                                                                                             |
+| **Lab 6** | Повна міграція на суворий TypeScript (`strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, `erasableSyntaxOnly`), Zod-валідація протоколу й конфігу, CI.                                                                  |
+| **Lab 7** | Vitest + `fast-check` + Playwright E2E, `SpatialHash`, `ObjectPool`, Web Worker для частинок (`Float32Array`), серверні боти, навантажувальний тест до 128 клієнтів.                                                               |
+| **Lab 8** | Production-сервер (`pino`, `prom-client` `/metrics`, `/health`, `/ready`), захист (`Origin`, per-IP ліміт, chaos-тест), multi-stage `Dockerfile` + `docker-compose.yml`, Release CI/CD (`ghcr.io`), PWA, фінальний реліз `v1.0.0`. |
 
 ---
 
 ## Prove It To Yourself — Результати експериментів
 
-_Усі заміри виконано в Node.js `v26.13.1` (V8) на цільовій машині._
+_Перевірено на `Node.js v26.13.1`, `dogfight-server v1.0.0`, `Dockerfile` та `server/scripts/chaos_test.mjs`._
 
-### 1. Оптимізація та деоптимізація V8 (`--allow-natives-syntax`)
+### 1. Сигнал `SIGTERM`, Graceful Shutdown і пастка `CMD npm start`
 
-Для `function add(a, b) { return a + b; }`:
+- Після отримання `SIGTERM` сервер негайно переводить `GET /ready` у `503`, розсилає клієнтам `{ type: 'shutdown', reason: 'server_shutting_down' }`, закриває WebSocket-з'єднання з кодом **`1001` (`GOING_AWAY`)**, завершує запис NDJSON-журналів, скидає буфер `pino` (`logger.flush()`) і виходить із кодом **`0`** за `< 5 c` (підтверджено `npm run chaos`: `gracefulShutdown=1001 reconnect=OK`).
+- **Чому не можна писати `CMD npm start` у shell-формі:** shell (`/bin/sh -c`) і процес `npm` стають PID 1 та часто не передають `SIGTERM` дочірньому `node`, через що Docker чекає весь `stop_grace_period` і завершує сервер через `SIGKILL` (обриваючи журнали та сокети). У нашому `Dockerfile` використано exec-форму `CMD ["node", "server/src/index.ts"]`, тому `node` сам є PID 1.
 
-```text
-До 'a', 'b' (після прогріву числами):
-  %GetOptimizationStatus(add) = 41 (0x29 = 0b101001 = kIsFunction | kOptimized | kTurboFanned)
-Після виклику add('a', 'b'):
-  %GetOptimizationStatus(add) = 65 (0x41 = 0b1000001 = kIsFunction | kInterpreted)
-```
+### 2. Кешування шарів Docker (`COPY package*.json` до `COPY . .`)
 
-**Висновок:** зміна типу аргументів (Smi → String) негайно спричинила деоптимізацію скомпільованого TurboFan-коду назад до інтерпретатора Ignition.
+У multi-stage [Dockerfile](./Dockerfile) спершу копіюються лише `package.json`, `package-lock.json` та маніфести workspace-пакетів, далі виконується `npm ci` (і `npm ci --omit=dev` у `runtime`-шарі), і лише потім копіюються вихідні файли (`shared/src`, `server/src`, `client/dist`). За правки вихідного коду кеш шару `npm ci` не інвалідується, що скорочує час перезбірки образу з десятків секунд до ~1–2 с.
 
-### 2. Hidden Classes: мономорфний vs поліморфний масив vs `Float32Array` (`1 000 000` елементів)
+### 3. Mixed Content: `ws://` зі сторінки `https://`
 
-| Структура даних (сума `.x` по `1e6` елементах) | Середній час | Відносно `Float32Array` |
-| ---------------------------------------------- | -----------: | ----------------------: |
-| Мономорфний масив `{ x, y }`                   | **4.455 ms** |        4.79× повільніше |
-| Поліморфний масив (кожен 10-й із полем `.z`)   | **4.848 ms** |        5.21× повільніше |
-| Плаский `Float32Array` (SoA / щільний буфер)   | **0.930 ms** |        **1.00× (база)** |
+Браузери блокують незашифрований `ws://` під час відкриття сторінки по `https://` (`SecurityError: Failed to construct 'WebSocket': An insecure WebSocket connection may not be initiated from a page loaded over HTTPS`). У `client/src/lobby/lobby.ts` функція `defaultWsUrl()` автоматично обирає `wss:` для `https:` і `ws:` для `http:`.
 
-**Висновок:** єдина форма об'єктів (Hidden Class) прискорює inline-cache доступ, а перехід на щільний `Float32Array` (як у `particle_worker.ts`) дає прискорення у **4.8–5.2×** завдяки локальності кешу CPU та відсутності обходу вказівників.
+### 4. Відхилення WebSocket із чужого `Origin` (`4008`)
 
-### 3. Передача `50 MB` `ArrayBuffer` у Worker: Clone vs `Transferable`
+Перевірено інтеграційним тестом у `server/test/server.spec.ts`: за `ALLOWED_ORIGINS=https://dogfight.example` спроба підключення з `Origin: https://evil.example` негайно відхиляється з кодом **`4008` (`FORBIDDEN_ORIGIN`)**, а в `GET /metrics` інкрементується `dogfight_ws_rejected_total{reason="origin"} 1`.
 
-| Спосіб `postMessage` (`52 428 800 B`)    |                   Час передачі |   `buf.byteLength` у відправника після надсилання |
-| ---------------------------------------- | -----------------------------: | ------------------------------------------------: |
-| Structured Clone (`postMessage(buf)`)    |                   **25.98 ms** |                        `52 428 800` (скопійовано) |
-| Transferable (`postMessage(buf, [buf])`) | **0.47 ms** (**55.3× швидше**) | **`0`** (буфер передано без копіювання, detached) |
+### 5. Стрибок `eventLoopUtilization` під час блокування циклу подій
 
-### 4. Property-based тестування (`fast-check`): `fc.float()` vs `fc.double()`
-
-Перевірка властивості `Math.fround(x) === x` (`seed: 42`):
+Фактичний замір `performance.eventLoopUtilization()` у Node.js `v26.13.1` під час синхронного блокування event loop на 150 мс:
 
 ```text
-fc.float({ noNaN: true })  -> failed: false (усі 32-бітні float проходять)
-fc.double({ noNaN: true }) -> failed: true
-  shrunk counterexample: [ 5e-324 ] (Number.MIN_VALUE)
-  Math.fround(5e-324) === 0 !== 5e-324
+ELU_SPIKE: { utilization: 0.7156, activeMs: 150.44, idleMs: 59.78 }
 ```
 
-**Висновок:** `fast-check` автоматично знаходить і стискає (shrink) мінімальний контрприклад (`5e-324`), підтверджуючи необхідність явного врахування 32-бітної точності (`Float32`) у бінарному кодеку.
+**Висновок:** синхронне навантаження миттєво відображається стрибком метрики `dogfight_event_loop_utilization` (до `71.56%` в експерименті, проти `4.2%` у штатній роботі на 8 гравцях), що дозволяє алертам Prometheus/Grafana вчасно виявляти деградацію ігрового тику.

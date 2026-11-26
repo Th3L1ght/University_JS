@@ -42,6 +42,19 @@ const RawEnvSchema = z.object({
         error: 'NODE_ENV має бути development, production або test',
       }),
     ),
+  LOG_LEVEL: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined || v === '' ? 'info' : v.toLowerCase()))
+    .pipe(
+      z.enum(['debug', 'info', 'warn', 'error', 'silent'], {
+        error: 'LOG_LEVEL має бути debug, info, warn, error або silent',
+      }),
+    ),
+  APP_VERSION: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined || v.trim() === '' ? '1.0.0' : v.trim())),
   HOST: z
     .string()
     .optional()
@@ -53,9 +66,21 @@ const RawEnvSchema = z.object({
     .optional()
     .transform((v) => (v === undefined || v === '' ? './logs' : v)),
   STATIC_DIR: z.string().optional(),
+  ALLOWED_ORIGINS: z
+    .string()
+    .optional()
+    .transform((v) =>
+      v === undefined || v.trim() === ''
+        ? []
+        : v
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+    ),
   MAX_ROOMS: intEnv('MAX_ROOMS', 20, 1, 1000),
   MAX_PLAYERS_PER_ROOM: intEnv('MAX_PLAYERS_PER_ROOM', 8, 2, 64),
   MAX_CONNECTIONS: intEnv('MAX_CONNECTIONS', 200, 1, 100000),
+  MAX_CONNECTIONS_PER_IP: intEnv('MAX_CONNECTIONS_PER_IP', 10, 1, 1000),
   MAX_BODY_BYTES: intEnv('MAX_BODY_BYTES', 4096, 64, 1048576),
   EMPTY_ROOM_TTL_MS: intEnv('EMPTY_ROOM_TTL_MS', 60000, 10, 86400000),
   SHUTDOWN_TIMEOUT_MS: intEnv('SHUTDOWN_TIMEOUT_MS', 5000, 10, 120000),
@@ -72,15 +97,19 @@ const RawEnvSchema = z.object({
 
 export interface ServerConfig {
   readonly nodeEnv: 'development' | 'production' | 'test';
+  readonly logLevel: 'debug' | 'info' | 'warn' | 'error' | 'silent';
+  readonly appVersion: string;
   readonly host: string;
   readonly port: number;
   readonly serveStatic: boolean;
   readonly logDir: string;
   readonly staticDir: string;
+  readonly allowedOrigins: readonly string[];
   readonly limits: {
     readonly maxRooms: number;
     readonly maxPlayersPerRoom: number;
     readonly maxConnections: number;
+    readonly maxConnectionsPerIp: number;
     readonly maxBodyBytes: number;
     readonly emptyRoomTtlMs: number;
     readonly shutdownTimeoutMs: number;
@@ -109,15 +138,19 @@ export function loadConfig(
   const d = parsed.data;
   return Object.freeze({
     nodeEnv: d.NODE_ENV,
+    logLevel: d.LOG_LEVEL,
+    appVersion: d.APP_VERSION,
     host: d.HOST,
     port: d.PORT,
     serveStatic: d.NODE_ENV !== 'development',
     logDir: path.resolve(cwd, d.LOG_DIR),
     staticDir: path.resolve(cwd, d.STATIC_DIR || path.join(REPO_ROOT, 'client/dist')),
+    allowedOrigins: Object.freeze([...d.ALLOWED_ORIGINS]),
     limits: Object.freeze({
       maxRooms: d.MAX_ROOMS,
       maxPlayersPerRoom: d.MAX_PLAYERS_PER_ROOM,
       maxConnections: d.MAX_CONNECTIONS,
+      maxConnectionsPerIp: d.MAX_CONNECTIONS_PER_IP,
       maxBodyBytes: d.MAX_BODY_BYTES,
       emptyRoomTtlMs: d.EMPTY_ROOM_TTL_MS,
       shutdownTimeoutMs: d.SHUTDOWN_TIMEOUT_MS,

@@ -12,6 +12,7 @@ import { createRequestHandler } from './http.ts';
 import { createMatchLog, type MatchLog } from './log/matchlog.ts';
 import { createLogger, type Logger } from './logger.ts';
 import { MatchManager } from './match.ts';
+import { createMetrics, type MetricsCollector } from './metrics.ts';
 import { RoomManager } from './rooms.ts';
 import { attachWebSocketServer, type WsServerHandle } from './ws.ts';
 
@@ -20,6 +21,7 @@ export interface AppInstance {
   readonly rooms: RoomManager;
   readonly matches: MatchManager;
   readonly ws: WsServerHandle;
+  readonly metrics: MetricsCollector;
   start(): Promise<AddressInfo | string | null>;
   shutdown(reason?: string): Promise<void>;
   readonly address: AddressInfo | string | null;
@@ -27,8 +29,12 @@ export interface AppInstance {
 
 export function createApp(
   config: ServerConfig,
-  { logger = createLogger() }: { readonly logger?: Logger } = {},
+  { logger = createLogger({ level: config.logLevel }) }: { readonly logger?: Logger } = {},
 ): AppInstance {
+  const metrics = createMetrics();
+  let shuttingDown = false;
+  let staticReady = !config.serveStatic;
+
   const rooms = new RoomManager({
     maxRooms: config.limits.maxRooms,
     maxPlayersPerRoom: config.limits.maxPlayersPerRoom,
@@ -42,10 +48,15 @@ export function createApp(
   const finishing = new Set<Promise<void>>();
 
   rooms.on('created', (room) => {
+    logger.info('room.created', {
+      roomId: room.id,
+      mode: room.mode,
+      maxPlayers: room.maxPlayers,
+    });
     const log = createMatchLog({
       dir: config.logDir,
       roomId: room.id,
-      onError: (error) => logger.error('помилка журналу матчу', { room: room.id, error }),
+      onError: (error) => logger.error('помилка журналу матчу', { roomId: room.id, error }),
     });
     room.replayId = log.id;
     logs.set(room.id, log);
@@ -72,9 +83,7 @@ export function createApp(
     log.write({ type: 'end' });
     const done = log
       .end()
-      .catch((error: unknown) =>
-        logger.error('помилка завершення журналу', { room: roomId, error }),
-      );
+      .catch((error: unknown) => logger.error('помилка завершення журналу', { roomId, error }));
     finishing.add(done);
     void done.finally(() => finishing.delete(done));
   }
@@ -85,6 +94,14 @@ export function createApp(
       config,
       rooms,
       logger,
+      metrics,
+      isReady: () => {
+        if (shuttingDown) return { ready: false, reason: 'shutting_down' };
+        if (config.serveStatic && !staticReady) {
+          return { ready: false, reason: 'static_bundle_missing' };
+        }
+        return { ready: true };
+      },
       addBots: (room, count) => matches.addBots(room, count),
       stats: () => ({ connections: ws?.connections.size ?? 0, ...matches.stats() }),
     }),
@@ -96,14 +113,16 @@ export function createApp(
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
     else socket.destroy();
   });
-  ws = attachWebSocketServer({ server, rooms, matches, config, logger });
+  ws = attachWebSocketServer({ server, rooms, matches, config, logger, metrics });
 
   async function start(): Promise<AddressInfo | string | null> {
     await mkdir(config.logDir, { recursive: true });
     if (config.serveStatic) {
       try {
         await stat(config.staticDir);
+        staticReady = true;
       } catch {
+        staticReady = false;
         logger.warn('каталог зі статикою не знайдено (виконайте npm run build)', {
           staticDir: config.staticDir,
         });
@@ -117,14 +136,20 @@ export function createApp(
       });
     });
     const address = server.address();
-    logger.info('сервер запущено', { address, env: config.nodeEnv, logDir: config.logDir });
+    logger.info('server.started', {
+      address,
+      env: config.nodeEnv,
+      version: config.appVersion,
+      logDir: config.logDir,
+    });
     return address;
   }
 
   let shutdownPromise: Promise<void> | null = null;
   function shutdown(reason = 'shutdown'): Promise<void> {
+    shuttingDown = true;
     shutdownPromise ??= (async () => {
-      logger.info('graceful shutdown: початок', { reason });
+      logger.info('server.shutdown', { reason, phase: 'start' });
       const timeoutMs = config.limits.shutdownTimeoutMs;
 
       const httpClosed = new Promise<void>((resolve) => server.close(() => resolve()));
@@ -137,12 +162,13 @@ export function createApp(
       await Promise.allSettled([...finishing]);
 
       const force = setTimeout(() => {
-        logger.warn('graceful shutdown: примусово закриваю залишкові з’єднання');
+        logger.warn('server.shutdown', { reason, phase: 'force_close' });
         server.closeAllConnections();
       }, timeoutMs);
       await httpClosed;
       clearTimeout(force);
-      logger.info('graceful shutdown: завершено');
+      logger.info('server.shutdown', { reason, phase: 'done' });
+      logger.flush?.();
     })();
     return shutdownPromise;
   }
@@ -152,6 +178,7 @@ export function createApp(
     rooms,
     matches,
     ws,
+    metrics,
     start,
     shutdown,
     get address() {
@@ -161,8 +188,6 @@ export function createApp(
 }
 
 async function main(): Promise<void> {
-  const logger = createLogger();
-
   let config: ServerConfig;
   try {
     config = loadConfig();
@@ -174,10 +199,18 @@ async function main(): Promise<void> {
     throw error;
   }
 
+  const logger = createLogger({ level: config.logLevel });
   const app = createApp(config, { logger });
 
   const fatal = (kind: string) => (error: unknown) => {
-    logger.error(`фатальна помилка: ${kind}`, { error });
+    logger.error(`server.fatal`, {
+      kind,
+      error:
+        error instanceof Error
+          ? { name: error.name, message: error.message, stack: error.stack }
+          : error,
+    });
+    logger.flush?.();
     setTimeout(() => process.exit(1), 3000).unref();
     void app.shutdown(kind).finally(() => process.exit(1));
   };

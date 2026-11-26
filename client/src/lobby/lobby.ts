@@ -415,6 +415,9 @@ export class Lobby extends EventTarget {
     });
     listen('roster', (detail) => this.#emit('roster', { players: detail.players }));
     listen('chat', (detail) => this.#emit('chat', detail));
+    listen('shutdown', () => {
+      this.#fail('Сервер перезапускається — перепідключення...', 'shutdown');
+    });
     listen('error', (detail) => {
       const code = typeof detail.code === 'string' ? detail.code : 'error';
       const message = typeof detail.message === 'string' ? detail.message : 'Помилка';

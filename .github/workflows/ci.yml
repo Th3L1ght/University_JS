@@ -1,7 +1,9 @@
-name: CI
+name: CI / CD
 
 on:
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -14,9 +16,68 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run format:check
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run test:coverage
+      - run: node server/scripts/chaos_test.mjs
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test
+
+  docker:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build -t dogfight:ci .
+      - name: Check image size (< 200 MB)
+        run: |
+          SIZE=$(docker image inspect dogfight:ci --format='{{.Size}}')
+          MB=$((SIZE / 1024 / 1024))
+          echo "Image size: ${MB} MB (${SIZE} bytes)"
+          test "$SIZE" -lt 209715200
+      - name: Smoke-test container (/health, /ready, /metrics)
+        run: |
+          docker run -d --name dogfight-smoke -p 3000:3000 dogfight:ci
+          sleep 3
+          curl -fsS http://127.0.0.1:3000/health | grep '"status":"ok"'
+          curl -fsS http://127.0.0.1:3000/ready | grep '"status":"ready"'
+          curl -fsS http://127.0.0.1:3000/metrics | grep 'dogfight_rooms_active'
+          docker stop dogfight-smoke && docker rm dogfight-smoke
+
+  release:
+    needs: [verify, docker]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:latest
+      # Deploy template (Fly.io / Render):
+      # - name: Deploy to Fly.io
+      #   if: env.FLY_API_TOKEN != ''
+      #   env:
+      #     FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      #   run: flyctl deploy --image ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+      # - name: Trigger Render Deploy Hook
+      #   if: env.RENDER_DEPLOY_HOOK_URL != ''
+      #   env:
+      #     RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+      #   run: curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL"

@@ -40,6 +40,16 @@ const INITIAL_CODEC: CodecNameValue = params.get('codec') === 'json' ? 'json' : 
 const INITIAL_INTERP_MS = numberParam('interp', 80);
 const MIN_LOADING_MS = 350;
 
+// Реєструємо Service Worker лише по HTTP(S), щоб не зламати file:// оффлайн-режим.
+if (
+  (globalThis.location?.protocol === 'http:' || globalThis.location?.protocol === 'https:') &&
+  'serviceWorker' in navigator
+) {
+  globalThis.addEventListener('load', () => {
+    void navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
+
 function buildWsUrl(): string {
   const url = new URL(defaultWsUrl());
   for (const key of ['latency', 'jitter', 'drop']) {

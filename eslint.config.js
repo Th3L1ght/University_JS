@@ -50,5 +50,10 @@ export default [
     files: ['client/src/**/*.ts'],
     languageOptions: { globals: { ...globals.browser } },
   },
+  {
+    // Service Worker для PWA.
+    files: ['client/public/sw.js'],
+    languageOptions: { globals: { ...globals.serviceworker } },
+  },
   prettier,
 ];
