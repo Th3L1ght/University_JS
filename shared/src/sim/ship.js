@@ -36,7 +36,25 @@ export const SHIP_PARAMS = Object.freeze({
   hitInvulnerability: 0.6, // с невразливості після влучання
 });
 
-const IDLE_CONTROLS = Object.freeze({ left: false, right: false, thrust: false });
+/** Керування судном за один крок: turn ∈ [-1, 1] (праворуч > 0), решта - прапорці. */
+export const IDLE_CONTROLS = Object.freeze({ thrust: false, turn: 0, fire: false, missile: false });
+
+/**
+ * Приводить будь-який вхід до канонічного вигляду. Приймає і старий формат { left, right, thrust },
+ * і новий { thrust, turn, fire, missile }. Значення обмежуються: turn - до [-1, 1].
+ */
+export function normalizeControls(input) {
+  if (!input) return IDLE_CONTROLS;
+  const rawTurn = Number.isFinite(input.turn)
+    ? input.turn
+    : (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  return {
+    thrust: Boolean(input.thrust),
+    turn: Math.min(1, Math.max(-1, rawTurn)),
+    fire: Boolean(input.fire),
+    missile: Boolean(input.missile),
+  };
+}
 
 export class Ship extends Entity {
   #hp;
@@ -82,6 +100,16 @@ export class Ship extends Entity {
     return this.#buffs.has(name);
   }
 
+  /** Залишок бонусу в секундах (0, якщо його немає). */
+  buffRemaining(name) {
+    return this.#buffs.get(name) ?? 0;
+  }
+
+  /** Залишок перезарядки основної зброї, секунди. */
+  get fireCooldown() {
+    return this.#fireCooldown;
+  }
+
   /** Додає або продовжує бонус до `duration` секунд. */
   addBuff(name, duration) {
     this.#buffs.set(name, Math.max(duration, this.#buffs.get(name) ?? 0));
@@ -124,17 +152,16 @@ export class Ship extends Entity {
     this.teleport(x, y);
   }
 
-  /** @param {{ left: boolean, right: boolean, thrust: boolean }} controls */
+  /** @param {{ thrust?: boolean, turn?: number, left?: boolean, right?: boolean }} controls */
   setControls(controls) {
-    this.controls = controls;
+    this.controls = normalizeControls(controls);
   }
 
   update(dt) {
     this.savePrev();
     const { turnRate, thrustAccel, drag, maxSpeed } = this.params;
 
-    const turn = (this.controls.right ? 1 : 0) - (this.controls.left ? 1 : 0);
-    this.angle = wrapAngle(this.angle + turn * turnRate * dt);
+    this.angle = wrapAngle(this.angle + this.controls.turn * turnRate * dt);
 
     this.thrust = this.controls.thrust ? 1 : 0;
     if (this.thrust) this.vel.addInPlace(Vector2.fromAngle(this.angle, thrustAccel * dt));
@@ -203,5 +230,40 @@ export class Ship extends Entity {
     this.world.spawn(missile);
     this.world.emit('fired', { shooter: this, bullet: missile, missile: true });
     return missile;
+  }
+
+  // --- Знімки ---
+
+  toSnapshot() {
+    return {
+      ...super.toSnapshot(),
+      hp: this.#hp,
+      thrust: this.thrust,
+      fireCooldown: this.#fireCooldown,
+      missileCooldown: this.#missileCooldown,
+      invulnerable: this.#invulnerable,
+      buffs: [...this.#buffs],
+      controls: { ...this.controls },
+    };
+  }
+
+  /**
+   * Перезаписує стан існуючого судна зі знімка (потрібно клієнту: реконсиляція прогнозу
+   * ставить авторитативний стан у той самий об'єкт). Відсутні поля залишаються за замовчуванням.
+   */
+  applySnapshot(data) {
+    this.applyBaseSnapshot({ components: {}, ...data, vx: data.vx ?? 0, vy: data.vy ?? 0 });
+    this.#hp = data.hp ?? this.params.maxHp;
+    this.thrust = data.thrust ? 1 : 0;
+    this.#fireCooldown = data.fireCooldown ?? 0;
+    this.#missileCooldown = data.missileCooldown ?? 0;
+    this.#invulnerable = data.invulnerable ?? 0;
+    this.#buffs = new Map(data.buffs ?? []);
+    this.controls = data.controls ? normalizeControls(data.controls) : IDLE_CONTROLS;
+    return this;
+  }
+
+  static fromSnapshot(data, params = SHIP_PARAMS) {
+    return new Ship({ x: data.x, y: data.y, params }).applySnapshot(data);
   }
 }

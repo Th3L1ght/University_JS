@@ -218,7 +218,7 @@ async function serveReplay(req, res, { config }, rawId) {
  * @param {object} context.config результат loadConfig()
  * @param {import('./rooms.js').RoomManager} context.rooms
  * @param {{ debug: Function, info: Function, warn: Function, error: Function }} context.logger
- * @param {() => { connections: number }} context.stats
+ * @param {() => { connections: number, matches: object[], summary: object }} context.stats
  */
 export function createRequestHandler(context) {
   const { config, rooms, logger, stats } = context;
@@ -234,14 +234,27 @@ export function createRequestHandler(context) {
     if (pathname === '/health') {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw methodNotAllowed(res, 'GET, HEAD');
       const memory = process.memoryUsage();
+      const current = stats();
       return sendJson(res, 200, {
         status: 'ok',
         uptimeSec: Math.round(process.uptime()),
         rooms: rooms.size,
-        connections: stats().connections,
+        connections: current.connections,
+        tick: current.summary,
         memory: { rss: memory.rss, heapUsed: memory.heapUsed },
         node: process.version,
         env: config.nodeEnv,
+      });
+    }
+
+    if (pathname === '/api/stats') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') throw methodNotAllowed(res, 'GET, HEAD');
+      const { connections, matches, summary } = stats();
+      return sendJson(res, 200, {
+        uptimeSec: Math.round(process.uptime()),
+        connections,
+        summary,
+        matches,
       });
     }
 

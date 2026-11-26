@@ -1,6 +1,6 @@
 {
   "name": "dogfight-server",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "private": true,
   "type": "module",
   "description": "Dogfight server: node:http + ws, rooms, NDJSON match logs",
@@ -14,6 +14,7 @@
     "test": "node --test \"test/*.test.js\""
   },
   "dependencies": {
+    "@dogfight/shared": "*",
     "ws": "^8.18.0"
   }
 }

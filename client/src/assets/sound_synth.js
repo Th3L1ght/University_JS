@@ -4,7 +4,7 @@
  * (з цих семплів напряму створюється AudioBuffer, без fetch і decodeAudioData).
  */
 
-import { createRng } from '../sim/rng.js';
+import { createRng } from '@dogfight/shared';
 
 export const SOUND_SAMPLE_RATE = 22050;
 

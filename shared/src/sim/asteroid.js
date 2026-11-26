@@ -25,9 +25,10 @@ export class Asteroid extends Entity {
    * @param {number} options.vx
    * @param {number} options.vy
    * @param {1 | 2 | 3} [options.size]
-   * @param {() => number} [options.rng] генератор випадкових чисел [0, 1)
+   * @param {() => number} options.rng генератор випадкових чисел [0, 1): обов'язковий,
+   *   щоб симуляція ніколи не звернулась до Math.random
    */
-  constructor({ x, y, vx, vy, size = 3, rng = Math.random }) {
+  constructor({ x, y, vx, vy, size = 3, rng }) {
     const config = ASTEROID_SIZES[size];
     super({ kind: Kind.ASTEROID, x, y, radius: config.radius });
     this.size = size;
@@ -60,5 +61,31 @@ export class Asteroid extends Entity {
   update(dt) {
     super.update(dt);
     this.angle = wrapAngle(this.angle + this.spin * dt);
+  }
+
+  toSnapshot() {
+    return {
+      ...super.toSnapshot(),
+      size: this.size,
+      hp: this.#hp,
+      spin: this.spin,
+      shape: [...this.shape],
+    };
+  }
+
+  static fromSnapshot(data) {
+    const asteroid = new Asteroid({
+      x: data.x,
+      y: data.y,
+      vx: data.vx,
+      vy: data.vy,
+      size: data.size,
+      rng: () => 0,
+    });
+    asteroid.applyBaseSnapshot(data);
+    asteroid.#hp = data.hp;
+    asteroid.spin = data.spin;
+    asteroid.shape = [...data.shape];
+    return asteroid;
   }
 }

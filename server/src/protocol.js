@@ -2,10 +2,21 @@
  * Версіонований JSON-протокол WebSocket (v: 1) з явною перевіркою схеми кожного вхідного
  * повідомлення. Модуль чистий: без мережі й без залежностей, тому тестується напряму.
  *
- * Клієнт -> сервер:  join { room, nickname } | chat { text } | leave {} | ping { t? }
+ * Клієнт -> сервер:  join { room, nickname } | chat { text } | leave {} | ping { t? } |
+ *                    ready { codec? }            - увійти в ігровий матч кімнати (створює судно) |
+ *                    codec { codec }             - змінити кодек знімків ('binary' | 'json') |
+ *                    netsim { latency?, jitter?, drop? } - емуляція мережі для цього з'єднання |
+ *                    input { seq, tick, thrust, turn, fire, missile?, prev? } - ввід (лише у JSON-режимі)
  * Сервер -> клієнт:  welcome { playerId, room } | roster { players } | chat { ... } |
- *                    pong { t } | error { code, message }
+ *                    pong { t } | error { code, message } |
+ *                    start { shipId, tickRate, tick, arena, seed, codec, netsimEnabled, netsim } |
+ *                    netsim { latency, jitter, drop }
+ *
+ * Ігровий трафік (знімки й ввід) іде бінарними кадрами (див. @dogfight/shared, codec/binary_codec.js)
+ * або, у режимі 'json', текстовими кадрами { v: 1, type: 'snapshot' | 'input', ... }.
  */
+
+import { INPUT_LIMITS, isCodecName } from '@dogfight/shared';
 
 export const PROTOCOL_VERSION = 1;
 
@@ -26,8 +37,25 @@ export const CloseCode = Object.freeze({
   SLOW_CONSUMER: 4005, // клієнт не встигає читати
 });
 
-export const CLIENT_MESSAGE_TYPES = Object.freeze(['join', 'chat', 'leave', 'ping']);
-export const SERVER_MESSAGE_TYPES = Object.freeze(['welcome', 'roster', 'chat', 'pong', 'error']);
+export const CLIENT_MESSAGE_TYPES = Object.freeze([
+  'join',
+  'chat',
+  'leave',
+  'ping',
+  'ready',
+  'codec',
+  'netsim',
+  'input',
+]);
+export const SERVER_MESSAGE_TYPES = Object.freeze([
+  'welcome',
+  'roster',
+  'chat',
+  'pong',
+  'error',
+  'start',
+  'netsim',
+]);
 
 export const ROOM_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{1,39}$/;
 // Керівні символи заборонені в нікнеймах і тексті: перевірка навмисно шукає саме їх.
@@ -59,6 +87,43 @@ const fieldValidators = {
     if (CONTROL_CHARS.test(trimmed)) return { error: 'text містить керівні символи' };
     return { value: trimmed };
   },
+  codecName(value) {
+    if (value === undefined) return { value };
+    if (!isCodecName(value)) return { error: 'codec має бути "binary" або "json"' };
+    return { value };
+  },
+  optionalFiniteNumber(value) {
+    if (value === undefined) return { value };
+    if (typeof value !== 'number' || !Number.isFinite(value))
+      return { error: 'значення має бути скінченним числом' };
+    return { value };
+  },
+  finiteNumber(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value))
+      return { error: 'значення має бути скінченним числом' };
+    return { value };
+  },
+  boolean(value) {
+    if (typeof value !== 'boolean') return { error: 'значення має бути булевим' };
+    return { value };
+  },
+  optionalBoolean(value) {
+    if (value === undefined) return { value };
+    if (typeof value !== 'boolean') return { error: 'значення має бути булевим' };
+    return { value };
+  },
+  // Лише ТИП і форма: діапазони (turn в [-1, 1], seq/tick) перевіряє validateInput у Match.
+  inputHistory(value) {
+    if (value === undefined) return { value };
+    if (!Array.isArray(value) || value.length > INPUT_LIMITS.maxHistory) {
+      return { error: `prev має бути масивом до ${INPUT_LIMITS.maxHistory} елементів` };
+    }
+    for (const item of value) {
+      if (item === null || typeof item !== 'object' || Array.isArray(item))
+        return { error: 'елемент prev має бути об’єктом' };
+    }
+    return { value };
+  },
   optionalNumber(value) {
     if (value === undefined) return { value };
     if (typeof value !== 'number' || !Number.isFinite(value))
@@ -73,6 +138,22 @@ const CLIENT_SCHEMA = Object.freeze({
   chat: { text: 'chatText' },
   leave: {},
   ping: { t: 'optionalNumber' },
+  ready: { codec: 'codecName' },
+  codec: { codec: 'codecName' },
+  netsim: {
+    latency: 'optionalFiniteNumber',
+    jitter: 'optionalFiniteNumber',
+    drop: 'optionalFiniteNumber',
+  },
+  input: {
+    seq: 'finiteNumber',
+    tick: 'finiteNumber',
+    thrust: 'boolean',
+    turn: 'finiteNumber',
+    fire: 'boolean',
+    missile: 'optionalBoolean',
+    prev: 'inputHistory',
+  },
 });
 
 const bad = (code, closeCode, reason) => ({ ok: false, code, closeCode, reason });

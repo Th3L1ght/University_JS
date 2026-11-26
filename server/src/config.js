@@ -90,6 +90,23 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
       ),
       rateLimitPerSec: readInt(env, 'RATE_LIMIT_PER_SEC', 20, { min: 1, max: 1000 }, problems),
       rateLimitBurst: readInt(env, 'RATE_LIMIT_BURST', 40, { min: 1, max: 10000 }, problems),
+      // Ігровий трафік (бінарні кадри вводу й ping) має власне відро: 30 Гц вводу + запас.
+      inputRateLimitPerSec: readInt(
+        env,
+        'INPUT_RATE_LIMIT_PER_SEC',
+        90,
+        { min: 1, max: 10000 },
+        problems,
+      ),
+      inputRateLimitBurst: readInt(
+        env,
+        'INPUT_RATE_LIMIT_BURST',
+        180,
+        { min: 1, max: 100000 },
+        problems,
+      ),
+      // 1 - дозволити емуляцію мережі (latency/jitter/drop) через /ws?... і повідомлення netsim.
+      netsimEnabled: readInt(env, 'NETSIM_ENABLED', 1, { min: 0, max: 1 }, problems) === 1,
     },
   };
 

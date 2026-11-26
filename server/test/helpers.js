@@ -5,6 +5,7 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { binaryCodec } from '@dogfight/shared';
 import { WebSocket } from 'ws';
 import { loadConfig } from '../src/config.js';
 import { createApp } from '../src/index.js';
@@ -68,8 +69,9 @@ export function openClient(wsUrl, options = {}) {
     });
     closed.catch(() => {});
 
-    socket.on('message', (data) => {
-      const message = JSON.parse(data.toString());
+    socket.on('message', (data, isBinary) => {
+      // Бінарні кадри (знімки, pong) декодуються кодеком; решта - керувальний JSON.
+      const message = isBinary ? binaryCodec.decode(data) : JSON.parse(data.toString());
       const index = waiters.findIndex((waiter) => waiter.match(message));
       if (index >= 0) waiters.splice(index, 1)[0].resolve(message);
       else inbox.push(message);

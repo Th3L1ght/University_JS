@@ -2,25 +2,40 @@
  * Світ: сховище сутностей на Map, один крок симуляції, правила гри (наслідки зіткнень, шкода,
  * вибухи, респаун, очки, поява астероїдів і бонусів) і шина подій.
  *
+ * Модуль живе в пакеті @dogfight/shared і виконується однаково на клієнті (прогноз, офлайн-режим)
+ * та на сервері (авторитативний стан). Тому він детермінований:
+ *   - немає Math.random і Date.now: уся випадковість іде з seeded-генератора mulberry32;
+ *   - крок симуляції отримує фіксований dt ззовні;
+ *   - id сутностей видає сам світ, порядок обходу Map = порядок додавання;
+ *   - немає залежностей від DOM, Canvas чи node:* (лише EventTarget/CustomEvent, що є всюди).
+ *
+ * Гравці. Світ підтримує кілька гравців (addPlayer/removePlayer/setInput). Режим однієї гри
+ * (офлайн) лишився: setPlayer(ship) + step(dt, controls) працюють із "головним" гравцем.
+ *
  * Шина подій: World успадковує EventTarget і диспатчить CustomEvent про ігрові події:
  *   fired         { shooter, bullet, missile }
  *   hit           { target, source, damage, destroyed }
  *   exploded      { entity, kind, size, x, y }
  *   pickup        { collector, pickup, effect }
- *   scoreChanged  { score, delta }
+ *   scoreChanged  { score, delta, playerId }
  * Симуляція нічого не знає про її споживачів (звук, HUD, мережа): вони самі підписуються.
  */
 
-import { Kind } from './entity.js';
+import { Entity, Kind } from './entity.js';
 import { Vector2 } from './vector.js';
 import { Asteroid } from './asteroid.js';
+import { Bullet } from './bullet.js';
 import { Explosion } from './explosion.js';
 import { createPickup, PICKUP_EFFECTS } from './pickup.js';
 import { applyPickup, attachHoming, runBehaviors } from './behaviors.js';
 import { findCollisions } from './collision.js';
 import { wrapEntity, wrappedDelta } from './arena.js';
 import { createRng } from './rng.js';
+import { IDLE_CONTROLS, normalizeControls, Ship } from './ship.js';
 import { TAU } from '../math.js';
+
+/** Ідентифікатор "головного" гравця в режимі однієї гри (setPlayer). */
+export const LOCAL_PLAYER_ID = 'local';
 
 export const WORLD_RULES = Object.freeze({
   initialAsteroids: 6,
@@ -33,6 +48,7 @@ export const WORLD_RULES = Object.freeze({
   safePointCandidates: 32, // скільки точок перевіряти під час пошуку безпечного місця
   contactDamagePerSize: 10, // шкода судну від зіткнення з астероїдом: × розмір
   ramDamage: 15, // шкода астероїду від тарану судном
+  killScore: 100, // очки за знищення чужого судна
   pickupInterval: 9, // с між спробами створити бонус
   maxPickups: 2,
   bounce: 0.8, // пружність зіткнень
@@ -66,16 +82,33 @@ export function mergeRules(...overrides) {
   return Object.freeze(rules);
 }
 
+/** Відновлює сутність потрібного класу зі знімка. */
+function entityFromSnapshot(data) {
+  switch (data.kind) {
+    case Kind.SHIP:
+      return Ship.fromSnapshot(data);
+    case Kind.BULLET:
+      return Bullet.fromSnapshot(data);
+    case Kind.ASTEROID:
+      return Asteroid.fromSnapshot(data);
+    case Kind.EXPLOSION:
+      return Explosion.fromSnapshot(data);
+    default:
+      return Entity.fromSnapshot(data);
+  }
+}
+
 export class World extends EventTarget {
   /** Сховище сутностей: Map<id, Entity>. Порядок обходу = порядок додавання. */
   #entities = new Map();
+  /** Гравці: Map<playerId, { id, ship, controls, respawnTimer, score }>. */
+  #players = new Map();
+  #primaryId = null;
   #rules;
   #rng;
-  #player = null;
-  #respawnTimer = null; // секунди до відродження або null, якщо гравець живий
+  #nextId;
   #refillTimer;
   #pickupTimer;
-  #score = 0;
 
   /**
    * @param {object} options
@@ -83,13 +116,18 @@ export class World extends EventTarget {
    * @param {number} options.height
    * @param {number} [options.seed] seed детермінованого генератора
    * @param {object} [options.rules] перевизначення правил (arena.json + параметри кімнати)
+   * @param {number} [options.firstId] перший id сутностей (світ прогнозу клієнта бере великий
+   *   зсув, щоб його локальні кулі не збігались з id, які видає сервер)
    */
-  constructor({ width, height, seed = 1, rules = {} }) {
+  constructor({ width, height, seed = 1, rules = {}, firstId = 1 }) {
     super();
     this.width = width;
     this.height = height;
+    /** true - події шини не диспатчаться (повторне програвання вводу під час реконсиляції). */
+    this.muted = false;
     this.#rules = mergeRules(rules);
     this.#rng = createRng(seed);
+    this.#nextId = firstId;
     this.#refillTimer = this.#rules.asteroidRefillDelay;
     this.#pickupTimer = this.#rules.pickupInterval;
   }
@@ -98,17 +136,18 @@ export class World extends EventTarget {
     return this.#rules;
   }
 
+  /** Судно "головного" гравця (офлайн-режим або перший доданий гравець). */
   get player() {
-    return this.#player;
+    return this.#players.get(this.#primaryId)?.ship ?? null;
   }
 
   get score() {
-    return this.#score;
+    return this.#players.get(this.#primaryId)?.score ?? 0;
   }
 
-  /** Секунди до відродження гравця (0, якщо він живий). */
+  /** Секунди до відродження головного гравця (0, якщо він живий). */
   get respawnIn() {
-    return this.#respawnTimer ?? 0;
+    return this.#players.get(this.#primaryId)?.respawnTimer ?? 0;
   }
 
   setSize(width, height) {
@@ -118,6 +157,7 @@ export class World extends EventTarget {
 
   /** Диспатчить ігрову подію шини. */
   emit(type, detail = {}) {
+    if (this.muted) return;
     this.dispatchEvent(new CustomEvent(type, { detail }));
   }
 
@@ -125,6 +165,7 @@ export class World extends EventTarget {
 
   /** Додає сутність у світ. Не викликати з циклу, що ітерує сам світ. */
   spawn(entity) {
+    if (!entity.id) entity.id = this.#nextId++;
     this.#entities.set(entity.id, entity);
     entity.world = this;
     return entity;
@@ -137,6 +178,15 @@ export class World extends EventTarget {
   despawn(id) {
     const entity = this.#entities.get(id);
     if (entity) entity.alive = false;
+  }
+
+  /** Негайно прибирає всі сутності виду `kind` (не викликати під час step). */
+  removeKind(kind) {
+    for (const [id, entity] of this.#entities) {
+      if (entity.kind !== kind) continue;
+      this.#entities.delete(id);
+      entity.world = null;
+    }
   }
 
   /** @returns {import('./entity.js').Entity | undefined} жива сутність за id */
@@ -156,10 +206,85 @@ export class World extends EventTarget {
     }
   }
 
-  /** Реєструє судно гравця й додає його у світ. */
+  // --- Гравці ---
+
+  #registerPlayer(playerId, ship) {
+    const player = { id: playerId, ship, controls: IDLE_CONTROLS, respawnTimer: null, score: 0 };
+    this.#players.set(playerId, player);
+    this.#primaryId ??= playerId;
+    return player;
+  }
+
+  /** Реєструє судно "головного" гравця (офлайн-режим) й додає його у світ. */
   setPlayer(ship) {
-    this.#player = ship;
+    this.#registerPlayer(LOCAL_PLAYER_ID, ship);
     this.spawn(ship);
+  }
+
+  /**
+   * Додає гравця з новим судном. Без x/y судно з'являється в безпечній точці й тимчасово невразливе.
+   * @returns {{ id: string, ship: Ship, score: number, respawnTimer: number | null }}
+   */
+  addPlayer(playerId, { x, y } = {}) {
+    if (this.#players.has(playerId)) throw new Error(`Гравець уже є у світі: ${playerId}`);
+    const ship = new Ship({ x: x ?? 0, y: y ?? 0 });
+    if (x === undefined || y === undefined) {
+      const point = this.#findSafePoint(ship);
+      ship.teleport(point.x, point.y);
+    }
+    ship.grantInvulnerability(this.#rules.respawnInvulnerability);
+    const player = this.#registerPlayer(playerId, ship);
+    this.spawn(ship);
+    return player;
+  }
+
+  /** Прибирає гравця разом із судном. */
+  removePlayer(playerId) {
+    const player = this.#players.get(playerId);
+    if (!player) return false;
+    this.#players.delete(playerId);
+    if (this.#entities.delete(player.ship.id)) player.ship.world = null;
+    player.ship.alive = false;
+    if (this.#primaryId === playerId) this.#primaryId = this.#players.keys().next().value ?? null;
+    return true;
+  }
+
+  hasPlayer(playerId) {
+    return this.#players.has(playerId);
+  }
+
+  getPlayer(playerId) {
+    return this.#players.get(playerId);
+  }
+
+  /** Усі гравці (записи лише для читання). */
+  *players() {
+    yield* this.#players.values();
+  }
+
+  /** Запам'ятовує керування гравця; діє на кожному кроці, доки не прийде нове. */
+  setInput(playerId, input) {
+    const player = this.#players.get(playerId);
+    if (player) player.controls = normalizeControls(input);
+  }
+
+  /**
+   * Клієнтська реконсиляція: ставить у судно гравця авторитативний стан із сервера.
+   * Судно знову потрапляє у світ, якщо воно живе, і виходить із нього, якщо знищене.
+   */
+  syncPlayerShip(playerId, data) {
+    const player = this.#players.get(playerId);
+    if (!player) return;
+    const { ship } = player;
+    this.#entities.delete(ship.id);
+    ship.applySnapshot(data);
+    player.respawnTimer = data.respawnTimer ?? null;
+    if (ship.alive) {
+      this.#entities.set(ship.id, ship);
+      ship.world = this;
+    } else {
+      ship.world = null;
+    }
   }
 
   /** Створює стартові астероїди подалі від центру арени, де з'являється гравець. */
@@ -180,12 +305,21 @@ export class World extends EventTarget {
   // --- Крок симуляції ---
 
   /**
-   * @param {number} dt крок, секунди
-   * @param {{ left: boolean, right: boolean, thrust: boolean }} input керування гравця
+   * @param {number} dt фіксований крок, секунди
+   * @param {object} [input] керування "головного" гравця ({ thrust, turn, fire, missile } або
+   *   старий формат { left, right, thrust }); решту гравців веде setInput
    */
   step(dt, input) {
-    const player = this.#player;
-    if (player?.alive) player.setControls(input);
+    if (input !== undefined && this.#primaryId !== null) this.setInput(this.#primaryId, input);
+
+    // Керування й вогонь: нові кулі з'являються ДО ітерації по світу, тож Map безпечно ітерується.
+    for (const player of this.#players.values()) {
+      const { ship, controls } = player;
+      if (!ship.alive || ship.world !== this) continue;
+      ship.controls = controls;
+      if (controls.fire) ship.fire();
+      if (controls.missile) ship.fireMissile();
+    }
 
     // Ці цикли лише змінюють наявні сутності й нічого не додають: Map безпечно ітерується.
     for (const entity of this.#entities.values()) {
@@ -218,6 +352,70 @@ export class World extends EventTarget {
     }
   }
 
+  // --- Знімки стану (повний, для тестів детермінізму, відкату й відладки) ---
+
+  /** @returns {object} чисті JSON-дані: повний стан світу, включно зі станом генератора */
+  toSnapshot() {
+    const entities = [];
+    const aliveShips = new Set();
+    for (const entity of this.#entities.values()) {
+      entities.push(entity.toSnapshot());
+      if (entity.kind === Kind.SHIP) aliveShips.add(entity.id);
+    }
+    return {
+      width: this.width,
+      height: this.height,
+      rules: { ...this.#rules },
+      rng: this.#rng.getState(),
+      nextId: this.#nextId,
+      refillTimer: this.#refillTimer,
+      pickupTimer: this.#pickupTimer,
+      primaryId: this.#primaryId,
+      players: [...this.#players.values()].map((player) => ({
+        id: player.id,
+        shipId: player.ship.id,
+        controls: { ...player.controls },
+        respawnTimer: player.respawnTimer,
+        score: player.score,
+        // Знищене судно поза Map: його стан зберігаємо окремо.
+        ship: aliveShips.has(player.ship.id) ? null : player.ship.toSnapshot(),
+      })),
+      entities,
+    };
+  }
+
+  /** Відновлює світ зі знімка: подальші кроки дають ті самі результати, що й в оригіналу. */
+  static fromSnapshot(data) {
+    const world = new World({
+      width: data.width,
+      height: data.height,
+      seed: 0,
+      rules: data.rules,
+      firstId: data.nextId,
+    });
+    world.#rng.setState(data.rng);
+    world.#refillTimer = data.refillTimer;
+    world.#pickupTimer = data.pickupTimer;
+
+    for (const item of data.entities) {
+      const entity = entityFromSnapshot(item);
+      world.#entities.set(entity.id, entity);
+      entity.world = world;
+    }
+    for (const item of data.players) {
+      const ship = world.#entities.get(item.shipId) ?? Ship.fromSnapshot(item.ship);
+      world.#players.set(item.id, {
+        id: item.id,
+        ship,
+        controls: normalizeControls(item.controls),
+        respawnTimer: item.respawnTimer,
+        score: item.score,
+      });
+    }
+    world.#primaryId = data.primaryId;
+    return world;
+  }
+
   // --- Правила зіткнень ---
 
   #resolveCollision(a, b) {
@@ -230,6 +428,9 @@ export class World extends EventTarget {
     let pair = pick(Kind.BULLET, Kind.ASTEROID);
     if (pair) return this.#bulletHitsAsteroid(...pair);
 
+    pair = pick(Kind.BULLET, Kind.SHIP);
+    if (pair) return this.#bulletHitsShip(...pair);
+
     pair = pick(Kind.SHIP, Kind.ASTEROID);
     if (pair) return this.#shipHitsAsteroid(...pair);
 
@@ -240,11 +441,30 @@ export class World extends EventTarget {
     return undefined;
   }
 
+  #playerByShipId(shipId) {
+    for (const player of this.#players.values()) {
+      if (player.ship.id === shipId) return player;
+    }
+    return undefined;
+  }
+
   #bulletHitsAsteroid(bullet, asteroid) {
     bullet.alive = false;
     const destroyed = asteroid.takeDamage(bullet.damage);
     this.emit('hit', { target: asteroid, source: bullet, damage: bullet.damage, destroyed });
-    if (destroyed) this.#destroyAsteroid(asteroid);
+    if (destroyed) this.#destroyAsteroid(asteroid, this.#playerByShipId(bullet.owner));
+  }
+
+  /** Влучання кулі в чуже судно. Власні кулі своє судно не зачіпають. */
+  #bulletHitsShip(bullet, ship) {
+    if (bullet.owner === ship.id) return;
+    bullet.alive = false;
+    const destroyed = ship.takeDamage(bullet.damage);
+    this.emit('hit', { target: ship, source: bullet, damage: bullet.damage, destroyed });
+    if (!destroyed) return;
+    this.#destroyShip(ship);
+    const shooter = this.#playerByShipId(bullet.owner);
+    if (shooter) this.#addScore(shooter, this.#rules.killScore);
   }
 
   #shipHitsAsteroid(ship, asteroid) {
@@ -256,7 +476,9 @@ export class World extends EventTarget {
     this.emit('hit', { target: ship, source: asteroid, damage, destroyed: shipDestroyed });
     if (shipDestroyed) this.#destroyShip(ship);
 
-    if (asteroid.takeDamage(this.#rules.ramDamage)) this.#destroyAsteroid(asteroid);
+    if (asteroid.takeDamage(this.#rules.ramDamage)) {
+      this.#destroyAsteroid(asteroid, this.#playerByShipId(ship.id));
+    }
   }
 
   #shipTakesPickup(ship, pickup) {
@@ -290,22 +512,24 @@ export class World extends EventTarget {
     // Імпульс уздовж нормалі, лише якщо кола зближуються.
     const approach = (b.vel.x - a.vel.x) * nx + (b.vel.y - a.vel.y) * ny;
     if (approach >= 0) return;
-    const impulse = (-(1 + WORLD_RULES.bounce) * approach) / (1 / massA + 1 / massB);
+    const impulse = (-(1 + this.#rules.bounce) * approach) / (1 / massA + 1 / massB);
     a.vel.addScaledInPlace({ x: nx, y: ny }, -impulse / massA);
     b.vel.addScaledInPlace({ x: nx, y: ny }, impulse / massB);
   }
 
   // --- Знищення, вибухи, очки ---
 
-  #addScore(delta) {
-    this.#score += delta;
-    this.emit('scoreChanged', { score: this.#score, delta });
+  /** Нараховує очки гравцеві; без гравця (куля без власника) очки нікому не йдуть. */
+  #addScore(player, delta) {
+    if (!player) return;
+    player.score += delta;
+    this.emit('scoreChanged', { score: player.score, delta, playerId: player.id });
   }
 
-  #destroyAsteroid(asteroid) {
+  #destroyAsteroid(asteroid, creditedPlayer) {
     const { x, y } = asteroid.pos;
     this.emit('exploded', { entity: asteroid, kind: Kind.ASTEROID, size: asteroid.size, x, y });
-    this.#addScore(asteroid.score);
+    this.#addScore(creditedPlayer, asteroid.score);
     this.spawn(
       new Explosion({
         x,
@@ -351,7 +575,8 @@ export class World extends EventTarget {
         tint: 'ship',
       }),
     );
-    this.#respawnTimer = this.#rules.respawnDelay;
+    const player = this.#playerByShipId(ship.id);
+    if (player) player.respawnTimer = this.#rules.respawnDelay;
   }
 
   // --- Поява та відродження ---
@@ -408,18 +633,20 @@ export class World extends EventTarget {
   }
 
   #updateRespawn(dt) {
-    if (this.#respawnTimer === null || !this.#player) return;
-    this.#respawnTimer -= dt;
-    if (this.#respawnTimer > 0) return;
+    for (const player of this.#players.values()) {
+      if (player.respawnTimer === null) continue;
+      player.respawnTimer -= dt;
+      if (player.respawnTimer > 0) continue;
 
-    this.#respawnTimer = null;
-    const point = this.#findSafePoint();
-    this.#player.respawnAt(point.x, point.y, this.#rules.respawnInvulnerability);
-    this.spawn(this.#player);
+      player.respawnTimer = null;
+      const point = this.#findSafePoint(player.ship);
+      player.ship.respawnAt(point.x, point.y, this.#rules.respawnInvulnerability);
+      this.spawn(player.ship);
+    }
   }
 
   /** Серед кількох випадкових точок бере ту, що найдалі від усіх перешкод. */
-  #findSafePoint() {
+  #findSafePoint(exceptShip) {
     const margin = 60;
     let best = new Vector2(this.width / 2, this.height / 2);
     let bestClearance = -Infinity;
@@ -429,7 +656,7 @@ export class World extends EventTarget {
       const y = margin + this.#rng() * Math.max(1, this.height - 2 * margin);
       let clearance = Infinity;
       for (const entity of this.#entities.values()) {
-        if (!entity.alive || !entity.collidable || entity === this.#player) continue;
+        if (!entity.alive || !entity.collidable || entity === exceptShip) continue;
         const dx = wrappedDelta(x, entity.pos.x, this.width);
         const dy = wrappedDelta(y, entity.pos.y, this.height);
         clearance = Math.min(clearance, Math.hypot(dx, dy) - entity.radius);

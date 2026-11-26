@@ -1,6 +1,6 @@
 {
   "name": "dogfight-client",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "private": true,
   "type": "module",
   "description": "Dogfight client: Vite + Canvas + WebSocket",
@@ -10,6 +10,9 @@
     "preview": "vite preview",
     "assets:generate": "node scripts/generate_assets.mjs",
     "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "@dogfight/shared": "*"
   },
   "devDependencies": {
     "vite": "^8.3.8"

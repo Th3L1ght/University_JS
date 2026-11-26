@@ -340,17 +340,25 @@ export class Lobby extends EventTarget {
       roomId,
       nickname: checked.name,
       entered: false,
+      playerId: null,
       room: checked.room,
+      listeners: [],
     };
     this.#session = session;
 
+    const listen = (type, handler) => {
+      connection.addEventListener(type, handler);
+      session.listeners.push([type, handler]);
+    };
+
     // Після кожного (пере)підключення join надсилається заново: сервер нічого не пам'ятає про сокет.
-    connection.addEventListener('connected', () => {
+    listen('connected', () => {
       this.#emit('connection', { state: 'connected' });
       connection.send('join', { room: roomId, nickname: session.nickname });
     });
-    connection.addEventListener('welcome', (event) => {
+    listen('welcome', (event) => {
       session.entered = true;
+      session.playerId = event.detail.playerId;
       session.room = event.detail.room;
       this.#emit('entered', {
         room: event.detail.room,
@@ -359,19 +367,17 @@ export class Lobby extends EventTarget {
         nickname: session.nickname,
       });
     });
-    connection.addEventListener('roster', (event) =>
-      this.#emit('roster', { players: event.detail.players }),
-    );
-    connection.addEventListener('chat', (event) => this.#emit('chat', event.detail));
-    connection.addEventListener('error', (event) => {
+    listen('roster', (event) => this.#emit('roster', { players: event.detail.players }));
+    listen('chat', (event) => this.#emit('chat', event.detail));
+    listen('error', (event) => {
       const { code, message } = event.detail;
       this.#emit('error', { error: new LobbyDataError(message, code), kind: code });
     });
-    connection.addEventListener('reconnecting', (event) => {
+    listen('reconnecting', (event) => {
       session.entered = false;
       this.#emit('connection', { state: 'reconnecting', ...event.detail });
     });
-    connection.addEventListener('disconnected', (event) => {
+    listen('disconnected', (event) => {
       const { code, willReconnect } = event.detail;
       if (this.#session !== session) return;
       if (!willReconnect) {
@@ -386,7 +392,7 @@ export class Lobby extends EventTarget {
       }
       this.#emit('connection', { state: 'disconnected', code, willReconnect });
     });
-    connection.addEventListener('failed', () => this.#emit('connection', { state: 'failed' }));
+    listen('failed', () => this.#emit('connection', { state: 'failed' }));
 
     connection.connect();
     return checked.room;
@@ -418,19 +424,37 @@ export class Lobby extends EventTarget {
   }
 
   /**
-   * Запускає локальний матч у вибраній кімнаті. Статичний хостинг не має ендпоінта join, тому перевірка
-   * локальна. Лобі закривається (WebSocket-сесія й усі запити скасовуються) ще до події 'joined'.
+   * Запускає матч у вибраній кімнаті. Якщо `keepConnection: true` і гравець уже в кімнаті на
+   * сервері, живий WebSocket передається в гру без перепідключення (лобі лише знімає свої
+   * слухачі й закриває HTTP-опитування). Інакше WebSocket закривається ще до події 'joined'.
    *
    * @returns {Promise<object | null>} кімната або null, якщо запустити не вдалося
    */
-  async join(roomId, { nickname = '' } = {}) {
+  async join(roomId, { nickname = '', keepConnection = false } = {}) {
     if (this.#closed) return null;
     const ownSlot = Boolean(this.#session?.entered && this.#session.roomId === roomId);
     const checked = this.#validate(roomId, nickname, { allowOwnSlot: ownSlot });
     if (checked.failure) return this.#fail(...checked.failure);
 
+    let connection = null;
+    let playerId = null;
+    if (keepConnection && ownSlot && this.#session) {
+      connection = this.#session.connection;
+      playerId = this.#session.playerId;
+      for (const [type, handler] of this.#session.listeners) {
+        connection.removeEventListener(type, handler);
+      }
+      this.#session = null;
+    }
+
     this.close('joined');
-    this.#emit('joined', { room: checked.room, nickname: checked.name });
+    this.#emit('joined', {
+      room: checked.room,
+      nickname: checked.name,
+      mode: this.#mode,
+      connection,
+      playerId,
+    });
     return checked.room;
   }
 

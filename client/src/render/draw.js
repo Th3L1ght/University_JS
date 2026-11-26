@@ -3,9 +3,7 @@
  * Стан симуляції тут лише читається.
  */
 
-import { lerp, lerpAngle, TAU } from '../math.js';
-import { Kind } from '../sim/entity.js';
-import { createRng } from '../sim/rng.js';
+import { createRng, Kind, lerp, lerpAngle, TAU } from '@dogfight/shared';
 import { asteroidFrameName, ASTEROID_VARIANTS } from '../assets/atlas.js';
 import { drawSprite } from './sprites.js';
 
@@ -59,6 +57,15 @@ export function drawBackground(ctx, view) {
 function paintShip(ctx, ship, state) {
   // Невразливе судно блимає.
   if (ship.invulnerable > 0) ctx.globalAlpha = 0.45 + 0.35 * Math.sin(state.now / 45);
+
+  // Чуже судно в мережевому матчі підсвічується м'яким кільцем.
+  if (state.localShipId && ship.id !== state.localShipId) {
+    ctx.strokeStyle = 'rgba(255, 130, 95, 0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, ship.radius + 4, 0, TAU);
+    ctx.stroke();
+  }
 
   // Бонус rapid fire підсвічується золотим кільцем.
   if (ship.hasBuff('rapid')) {
@@ -157,11 +164,11 @@ function drawEntity(ctx, view, entity, painter, state) {
   }
 }
 
-function drawEntities(ctx, view, world, state) {
+function drawEntities(ctx, arena, world, state) {
   for (const kind of DRAW_ORDER) {
     const painter = PAINTERS[kind];
     for (const entity of world.ofKind(kind)) {
-      if (entity.alive) drawEntity(ctx, view, entity, painter, state);
+      if (entity.alive) drawEntity(ctx, arena, entity, painter, state);
     }
   }
 }
@@ -227,7 +234,7 @@ function drawHud(ctx, view, world, metrics, session) {
   ctx.textBaseline = 'bottom';
   ctx.fillStyle = 'rgba(190, 215, 255, 0.6)';
   ctx.fillText(
-    '← → / A D: поворот    ↑ / W: тяга    Пробіл: вогонь    X / E: ракета    M: звук',
+    '← → / A D: поворот    ↑ / W: тяга    Пробіл: вогонь    X / E: ракета    M: звук    Tab / F3: Netgraph',
     14,
     view.height - 12,
   );
@@ -237,15 +244,37 @@ function drawHud(ctx, view, world, metrics, session) {
 /**
  * @param {CanvasRenderingContext2D} ctx
  * @param {{ width: number, height: number }} view розмір області в CSS-пікселях
- * @param {import('../sim/world.js').World} world
+ * @param {{ width: number, height: number, player: any, score: number, respawnIn: number, ofKind: Function }} world
  * @param {number} alpha частка кроку симуляції [0, 1) для інтерполяції
  * @param {{ stepsPerSec: number, fps: number, frameTimeMs: number }} metrics
  * @param {number} now поточний час, мс (лише для анімацій)
  * @param {Record<string, object>} sheets завантажені спрайт-листи (loadAll().sprites)
- * @param {{ nickname: string, roomName: string } | null} [session]
+ * @param {{ nickname: string, roomName: string, mode?: string } | null} [session]
  */
 export function drawFrame(ctx, view, world, alpha, metrics, now, sheets, session = null) {
   drawBackground(ctx, view);
-  drawEntities(ctx, view, world, { alpha, now, sheets });
+  const arena = { width: world.width, height: world.height };
+  const localShipId = world.player?.id ?? null;
+
+  const scaled = arena.width !== view.width || arena.height !== view.height;
+  if (scaled && arena.width > 0 && arena.height > 0) {
+    const scale = Math.min(view.width / arena.width, view.height / arena.height);
+    const offsetX = (view.width - arena.width * scale) / 2;
+    const offsetY = (view.height - arena.height * scale) / 2;
+    ctx.save();
+    ctx.translate(offsetX, offsetY);
+    ctx.scale(scale, scale);
+    ctx.beginPath();
+    ctx.rect(0, 0, arena.width, arena.height);
+    ctx.clip();
+    drawEntities(ctx, arena, world, { alpha, now, sheets, localShipId });
+    ctx.strokeStyle = 'rgba(95, 215, 255, 0.25)';
+    ctx.lineWidth = 1.5 / scale;
+    ctx.strokeRect(0.5, 0.5, arena.width - 1, arena.height - 1);
+    ctx.restore();
+  } else {
+    drawEntities(ctx, arena, world, { alpha, now, sheets, localShipId });
+  }
+
   drawHud(ctx, view, world, metrics, session);
 }

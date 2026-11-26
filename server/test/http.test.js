@@ -191,6 +191,7 @@ describe('HTTP: GET /api/replays/:id (стрімінг журналу)', () => {
 describe('HTTP: статика та захист від path traversal', () => {
   let env;
   let outsideFile;
+  let symlinkSupported = true;
   before(async () => {
     env = await startTestApp();
     await writeFile(path.join(env.staticDir, 'index.html'), '<!doctype html><title>ok</title>');
@@ -207,7 +208,12 @@ describe('HTTP: статика та захист від path traversal', () => {
     await writeFile(path.join(env.staticDir, 'sub', 'index.html'), 'sub index');
     outsideFile = path.join(env.dir, 'secret.txt');
     await writeFile(outsideFile, 'SECRET');
-    await symlink(outsideFile, path.join(env.staticDir, 'leak.txt'));
+    try {
+      await symlink(outsideFile, path.join(env.staticDir, 'leak.txt'));
+    } catch (error) {
+      if (error.code === 'EPERM' || error.code === 'EACCES') symlinkSupported = false;
+      else throw error;
+    }
   });
   after(() => env.stop());
 
@@ -262,7 +268,11 @@ describe('HTTP: статика та захист від path traversal', () => {
     }
   });
 
-  test('символічне посилання назовні кореня -> 403', async () => {
+  test('символічне посилання назовні кореня -> 403', async (t) => {
+    if (!symlinkSupported) {
+      t.skip('Windows без прав на створення симлінків (EPERM)');
+      return;
+    }
     const response = await fetch(`${env.url}/leak.txt`);
     assert.equal(response.status, 403);
     assert.ok(!(await response.text()).includes('SECRET'));

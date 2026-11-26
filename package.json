@@ -1,12 +1,13 @@
 {
   "name": "dogfight",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "private": true,
   "type": "module",
-  "description": "Dogfight: Lab 4 - Node.js (EventEmitter, Streams, WebSocket)",
+  "description": "Dogfight: Lab 5 - Real-Time Networking (authoritative server, prediction, binary protocol)",
   "workspaces": [
     "client",
-    "server"
+    "server",
+    "shared"
   ],
   "engines": {
     "node": ">=22"

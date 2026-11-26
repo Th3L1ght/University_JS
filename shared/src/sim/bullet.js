@@ -29,4 +29,19 @@ export class Bullet extends Entity {
     this.ttl -= dt;
     if (this.ttl <= 0) this.alive = false;
   }
+
+  toSnapshot() {
+    return { ...super.toSnapshot(), owner: this.owner, damage: this.damage, ttl: this.ttl };
+  }
+
+  static fromSnapshot(data) {
+    const bullet = new Bullet({
+      pos: { x: data.x, y: data.y },
+      vel: { x: data.vx, y: data.vy },
+      owner: data.owner,
+      damage: data.damage,
+      ttl: data.ttl,
+    });
+    return bullet.applyBaseSnapshot(data);
+  }
 }

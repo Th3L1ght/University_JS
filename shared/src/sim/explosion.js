@@ -56,4 +56,25 @@ export class Explosion extends Entity {
     }
     this.alive = anyAlive;
   }
+
+  toSnapshot() {
+    return {
+      ...super.toSnapshot(),
+      tint: this.tint,
+      particles: this.particles.map((p) => ({ ...p })),
+    };
+  }
+
+  static fromSnapshot(data) {
+    const explosion = new Explosion({
+      x: data.x,
+      y: data.y,
+      rng: () => 0,
+      count: 0,
+      tint: data.tint,
+    });
+    explosion.applyBaseSnapshot(data);
+    explosion.particles = data.particles.map((p) => ({ ...p }));
+    return explosion;
+  }
 }

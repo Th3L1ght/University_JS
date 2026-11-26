@@ -3,10 +3,14 @@
  *
  *  - черга відправки: повідомлення, надіслані до відкриття сокета (CONNECTING) або під час
  *    перепідключення, чекають у черзі й відправляються після відкриття, у тому самому порядку;
+ *  - підтримка бінарних кадрів (`socket.binaryType = 'arraybuffer'`): ігрові повідомлення
+ *    (`input`, `snapshot`, `ping`, `pong`) кодуються/декодуються через `binaryCodec` із
+ *    `@dogfight/shared`; керувальні повідомлення лишаються JSON v1;
  *  - диспетчеризація вхідних повідомлень за полем `type`: кожен тип стає подією EventTarget
- *    (`welcome`, `roster`, `chat`, `pong`, `error`);
+ *    (`welcome`, `roster`, `chat`, `start`, `snapshot`, `pong`, `error`, `netsim`);
  *  - автоматичне перепідключення з експоненційним backoff, окрім випадків, коли сервер явно
- *    відмовив (коди нижче) або з'єднання закрив сам користувач.
+ *    відмовив (коди нижче) або з'єднання закрив сам користувач;
+ *  - облік трафіку (`bytesIn`, `bytesOut`) для оверлея Netgraph.
  *
  * Події життєвого циклу: connected, disconnected { code, reason, willReconnect },
  * reconnecting { attempt, delayMs }, failed, protocolerror { reason }.
@@ -15,6 +19,7 @@
  * і лише потім скидається черга, щоб чат не випередив join.
  */
 
+import { binaryCodec } from '@dogfight/shared';
 import { backoffDelay } from '../util/backoff.js';
 
 export const PROTOCOL_VERSION = 1;
@@ -34,6 +39,13 @@ export const NO_RECONNECT_CODES = Object.freeze([
 
 const WS_CONNECTING = 0;
 const WS_OPEN = 1;
+const TEXT_ENCODER = new TextEncoder();
+
+function payloadByteLength(data) {
+  if (typeof data === 'string') return TEXT_ENCODER.encode(data).byteLength;
+  if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return data.byteLength;
+  return 0;
+}
 
 export class Connection extends EventTarget {
   #url;
@@ -47,6 +59,8 @@ export class Connection extends EventTarget {
   #attempt = 0;
   #timer = null;
   #closedByUser = false;
+  #bytesIn = 0;
+  #bytesOut = 0;
 
   /**
    * @param {object} options
@@ -79,6 +93,14 @@ export class Connection extends EventTarget {
     return this.#queue.length;
   }
 
+  get bytesIn() {
+    return this.#bytesIn;
+  }
+
+  get bytesOut() {
+    return this.#bytesOut;
+  }
+
   #emit(type, detail) {
     this.dispatchEvent(new CustomEvent(type, { detail }));
   }
@@ -93,6 +115,7 @@ export class Connection extends EventTarget {
   #open(state) {
     this.#state = state === 'connecting' && this.#attempt > 0 ? 'reconnecting' : state;
     const socket = new this.#WebSocketImpl(this.#url);
+    socket.binaryType = 'arraybuffer';
     this.#socket = socket;
 
     socket.onopen = () => {
@@ -117,6 +140,20 @@ export class Connection extends EventTarget {
   }
 
   #onMessage(data) {
+    this.#bytesIn += payloadByteLength(data);
+
+    if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+      let message;
+      try {
+        message = binaryCodec.decode(data);
+      } catch (error) {
+        this.#emit('protocolerror', { reason: error.message });
+        return;
+      }
+      this.#emit(message.type, message);
+      return;
+    }
+
     let message;
     try {
       message = JSON.parse(data);
@@ -165,14 +202,31 @@ export class Connection extends EventTarget {
     }, delayMs);
   }
 
+  #transmit(frame) {
+    this.#bytesOut += payloadByteLength(frame);
+    this.#socket.send(frame);
+  }
+
   #flush() {
     while (this.#queue.length > 0 && this.#socket?.readyState === WS_OPEN) {
-      this.#socket.send(this.#queue.shift());
+      this.#transmit(this.#queue.shift());
     }
   }
 
+  #enqueueOrSend(frame) {
+    if (this.#state === 'closed') throw new Error('З’єднання закрито');
+    if (this.#state === 'open' && this.#socket?.readyState === WS_OPEN) {
+      this.#transmit(frame);
+      return 'sent';
+    }
+    if (this.#state === 'idle') throw new Error('Спершу викличте connect()');
+    if (this.#queue.length >= this.#maxQueue) throw new Error('Черга відправки переповнена');
+    this.#queue.push(frame);
+    return 'queued';
+  }
+
   /**
-   * Надсилає повідомлення { v, type, ...payload }. Якщо сокет ще не відкрито (CONNECTING або
+   * Надсилає JSON-повідомлення { v, type, ...payload }. Якщо сокет ще не відкрито (CONNECTING або
    * перепідключення), повідомлення потрапляє в чергу.
    *
    * @returns {'sent' | 'queued'}
@@ -181,15 +235,16 @@ export class Connection extends EventTarget {
   send(type, payload = {}) {
     if (this.#state === 'closed') throw new Error('З’єднання закрито');
     const text = JSON.stringify({ v: PROTOCOL_VERSION, type, ...payload });
+    return this.#enqueueOrSend(text);
+  }
 
-    if (this.#state === 'open' && this.#socket?.readyState === WS_OPEN) {
-      this.#socket.send(text);
-      return 'sent';
-    }
-    if (this.#state === 'idle') throw new Error('Спершу викличте connect()');
-    if (this.#queue.length >= this.#maxQueue) throw new Error('Черга відправки переповнена');
-    this.#queue.push(text);
-    return 'queued';
+  /**
+   * Надсилає готовий бінарний кадр (ArrayBuffer / TypedArray) напряму без JSON-серіалізації.
+   * @param {ArrayBuffer | ArrayBufferView} buffer
+   * @returns {'sent' | 'queued'}
+   */
+  sendBinary(buffer) {
+    return this.#enqueueOrSend(buffer);
   }
 
   /** Закриває з'єднання остаточно: перепідключення не буде, черга скидається. */

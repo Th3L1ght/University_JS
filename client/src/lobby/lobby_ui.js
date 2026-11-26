@@ -369,7 +369,10 @@ export function createLobbyUi({ container, lobby, onBeforeJoin }) {
 
   startButton.addEventListener('click', () => {
     onBeforeJoin?.(); // спершу синхронно (поки діє жест користувача) - розблокування звуку
-    lobby.join(currentRoom.id, { nickname: nickname.value.trim() });
+    lobby.join(currentRoom.id, {
+      nickname: nickname.value.trim(),
+      keepConnection: serverMode(),
+    });
   });
 
   updateMode();

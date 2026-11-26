@@ -2,16 +2,22 @@
  * Dev-режим: Node-сервер (з автоперезапуском) і Vite dev-сервер одночасно.
  * Vite проксує /api і /ws на сервер (див. client/vite.config.js).
  * Ctrl+C зупиняє обох; якщо один процес завершився - зупиняється й інший.
+ *
+ * Кросплатформенність: на Windows npm - це npm.cmd, а з Node 20.12+ запуск .cmd/.bat через
+ * spawn без shell завершується помилкою EINVAL, тому там додається shell: true.
  */
 
 import { spawn } from 'node:child_process';
+
+const isWindows = process.platform === 'win32';
+const npmCommand = isWindows ? 'npm.cmd' : 'npm';
 
 const children = [
   spawn(process.execPath, ['--watch', '--env-file-if-exists=.env', 'server/src/index.js'], {
     stdio: 'inherit',
     env: { ...process.env, NODE_ENV: 'development' },
   }),
-  spawn('npm', ['run', 'dev', '--workspace=client'], { stdio: 'inherit' }),
+  spawn(npmCommand, ['run', 'dev', '--workspace=client'], { stdio: 'inherit', shell: isWindows }),
 ];
 
 let stopping = false;

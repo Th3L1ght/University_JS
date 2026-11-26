@@ -5,7 +5,7 @@
  */
 
 import { drawBackground } from './draw.js';
-import { TAU } from '../math.js';
+import { TAU } from '@dogfight/shared';
 
 const FONT = 'ui-monospace, Menlo, Consolas, monospace';
 const BUTTON = { width: 180, height: 44 };

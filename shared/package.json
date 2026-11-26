@@ -1,0 +1,19 @@
+{
+  "name": "@dogfight/shared",
+  "version": "5.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dogfight shared: детермінована симуляція, протокол і кодеки (без DOM і node:*)",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "bench": "node scripts/bench_codec.mjs"
+  }
+}

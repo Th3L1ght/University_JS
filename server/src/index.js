@@ -15,6 +15,7 @@ import { ConfigError, loadConfig } from './config.js';
 import { createRequestHandler } from './http.js';
 import { createMatchLog } from './log/matchlog.js';
 import { createLogger } from './logger.js';
+import { MatchManager } from './match.js';
 import { RoomManager } from './rooms.js';
 import { attachWebSocketServer } from './ws.js';
 
@@ -28,6 +29,10 @@ export function createApp(config, { logger = createLogger() } = {}) {
     maxPlayersPerRoom: config.limits.maxPlayersPerRoom,
     emptyRoomTtlMs: config.limits.emptyRoomTtlMs,
   });
+
+  // Авторитативні ігрові сесії (30 Гц): по одній на кімнату, з'являються за першим ready.
+  const matches = new MatchManager({ logger });
+  rooms.on('removed', (room) => matches.remove(room.id));
 
   // --- Журнали матчів: по одному потоку на кімнату ---
   const logs = new Map(); // roomId -> matchlog
@@ -78,7 +83,7 @@ export function createApp(config, { logger = createLogger() } = {}) {
       config,
       rooms,
       logger,
-      stats: () => ({ connections: ws?.connections.size ?? 0 }),
+      stats: () => ({ connections: ws?.connections.size ?? 0, ...matches.stats() }),
     }),
   );
   // Некоректний HTTP від клієнта: відповідаємо 400 і закриваємо, процес не падає.
@@ -87,7 +92,7 @@ export function createApp(config, { logger = createLogger() } = {}) {
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
     else socket.destroy();
   });
-  ws = attachWebSocketServer({ server, rooms, config, logger });
+  ws = attachWebSocketServer({ server, rooms, matches, config, logger });
 
   async function start() {
     await mkdir(config.logDir, { recursive: true });
@@ -128,6 +133,7 @@ export function createApp(config, { logger = createLogger() } = {}) {
       const httpClosed = new Promise((resolve) => server.close(() => resolve()));
       server.closeIdleConnections();
 
+      matches.close();
       await ws.close({ timeoutMs });
       rooms.destroy();
       for (const roomId of [...logs.keys()]) finishLog(roomId);
@@ -147,6 +153,7 @@ export function createApp(config, { logger = createLogger() } = {}) {
   return {
     server,
     rooms,
+    matches,
     ws,
     start,
     shutdown,

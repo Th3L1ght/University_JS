@@ -12,8 +12,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { binaryCodec, MsgType } from '@dogfight/shared';
 import { WebSocket, WebSocketServer } from 'ws';
 import { CloseCode, encodeServerMessage, parseClientMessage } from './protocol.js';
+import { NetSim, parseNetsimParams } from './netsim.js';
 import { TokenBucket } from './rate_limit.js';
 import { RoomError } from './rooms.js';
 
@@ -21,6 +23,14 @@ import { RoomError } from './rooms.js';
 const MAX_DROPPED_BEFORE_DISCONNECT = 100;
 /** Жорстка межа буфера: у скільки разів перевищує maxBufferedBytes, щоб відключити одразу. */
 const HARD_BUFFER_FACTOR = 4;
+/** Скільки відхилених команд вводу терпимо, перш ніж відключити клієнта як підозрілого. */
+const MAX_BAD_INPUTS = 30;
+
+/** Дешева перевірка префікса текстового кадру: чи це JSON-ввід (до повного розбору). */
+function isInputFrame(data) {
+  const head = data.subarray ? data.subarray(0, 24).toString('utf8') : String(data).slice(0, 24);
+  return head.startsWith('{"v":1,"type":"input"');
+}
 
 /**
  * Надсилає повідомлення з урахуванням повільного клієнта.
@@ -33,7 +43,16 @@ const HARD_BUFFER_FACTOR = 4;
  * @param {object} payload
  * @param {{ maxBufferedBytes: number, logger: object, stats?: { dropped: number } }} options
  */
-export function safeSend(conn, type, payload, { maxBufferedBytes, logger, stats }) {
+export function safeSend(conn, type, payload, options) {
+  return deliver(conn, encodeServerMessage(type, payload), options);
+}
+
+/**
+ * Ядро політики повільного клієнта: надсилає вже закодований кадр (рядок = текстовий кадр,
+ * ArrayBuffer/Buffer = бінарний). Знімки світу тут - ідеальні кандидати на відкидання:
+ * застарілий знімок нікому не потрібен, нового чекати лише 33 мс.
+ */
+export function deliver(conn, data, { maxBufferedBytes, logger, stats }) {
   const { socket } = conn;
   if (socket.readyState !== WebSocket.OPEN) return 'closed';
 
@@ -57,7 +76,7 @@ export function safeSend(conn, type, payload, { maxBufferedBytes, logger, stats 
     return 'dropped';
   }
 
-  socket.send(encodeServerMessage(type, payload), (error) => {
+  socket.send(data, (error) => {
     if (error) logger.warn('помилка відправки', { error: error.message });
   });
   return 'sent';
@@ -70,12 +89,12 @@ export function safeSend(conn, type, payload, { maxBufferedBytes, logger, stats 
  * @param {object} options.config результат loadConfig()
  * @param {object} options.logger
  */
-export function attachWebSocketServer({ server, rooms, config, logger }) {
+export function attachWebSocketServer({ server, rooms, matches, config, logger }) {
   const { ws: wsConfig, limits } = config;
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: wsConfig.maxPayload });
   const connections = new Set();
   const byRoom = new Map(); // roomId -> Set<conn>
-  const stats = { accepted: 0, rejected: 0, dropped: 0, violations: 0 };
+  const stats = { accepted: 0, rejected: 0, dropped: 0, violations: 0, rejectedInputs: 0 };
   const sendOptions = { maxBufferedBytes: wsConfig.maxBufferedBytes, logger, stats };
 
   const send = (conn, type, payload) => safeSend(conn, type, payload, sendOptions);
@@ -83,6 +102,9 @@ export function attachWebSocketServer({ server, rooms, config, logger }) {
     for (const conn of byRoom.get(roomId) ?? []) send(conn, type, payload);
   };
   const sendError = (conn, code, message) => send(conn, 'error', { code, message });
+  /** Ігровий кадр (знімок, pong): іде через емулятор мережі з'єднання (затримка/джиттер/втрати). */
+  const sendGame = (conn, frame) =>
+    conn.netsim.schedule('out', () => deliver(conn, frame, sendOptions));
 
   // --- Підписка на події кімнат: мережевий шар лише реагує на стан ---
   rooms.on('created', (room) => {
@@ -108,8 +130,19 @@ export function attachWebSocketServer({ server, rooms, config, logger }) {
     conn.socket.close(closeCode, code); // причина закриття - короткий ASCII-код (ліміт 123 байти)
   }
 
+  /** Прибирає судно гравця з матчу; порожній матч зупиняється й видаляється. */
+  function leaveMatch(conn) {
+    if (!conn.inMatch) return;
+    conn.inMatch = false;
+    const { match } = conn;
+    conn.match = null;
+    match.removePlayer(conn.player.id);
+    if (match.playerCount === 0) matches.remove(match.roomId);
+  }
+
   function leaveRoom(conn) {
     if (!conn.joined) return;
+    leaveMatch(conn);
     conn.joined = false;
     byRoom.get(conn.room.id)?.delete(conn);
     conn.room.leave(conn.player.id);
@@ -166,18 +199,114 @@ export function attachWebSocketServer({ server, rooms, config, logger }) {
     ping(conn, message) {
       send(conn, 'pong', { t: message.t ?? null, serverTime: Date.now() });
     },
+
+    /** Вхід у матч: створює судно, відповідає start; далі йдуть бінарні знімки. */
+    ready(conn, message) {
+      if (!conn.joined) {
+        return violate(conn, CloseCode.POLICY_VIOLATION, 'not_joined', 'спершу надішліть join');
+      }
+      if (conn.inMatch) return sendError(conn, 'already_ready', 'ви вже в матчі');
+      const codec = message.codec ?? 'binary';
+      const match = matches.getOrCreate(conn.room);
+      const info = match.addPlayer(conn.player.id, {
+        nickname: conn.player.nickname,
+        codec,
+        send: (frame) => sendGame(conn, frame),
+      });
+      conn.inMatch = true;
+      conn.match = match;
+      logger.info('гравець увійшов у матч', {
+        room: conn.room.id,
+        playerId: conn.player.id,
+        codec,
+      });
+      return send(conn, 'start', {
+        ...info,
+        codec,
+        netsimEnabled: wsConfig.netsimEnabled,
+        netsim: conn.netsim.toJSON(),
+      });
+    },
+
+    codec(conn, message) {
+      if (!conn.inMatch) return sendError(conn, 'not_in_match', 'спершу надішліть ready');
+      if (message.codec) conn.match.setCodec(conn.player.id, message.codec);
+      return undefined;
+    },
+
+    netsim(conn, message) {
+      if (!wsConfig.netsimEnabled) {
+        return sendError(conn, 'netsim_disabled', 'емуляцію мережі вимкнено (NETSIM_ENABLED=0)');
+      }
+      const parsed = parseNetsimParams(message);
+      if (!parsed.ok) return sendError(conn, 'bad_netsim', parsed.error);
+      conn.netsim.update(parsed.value);
+      return send(conn, 'netsim', conn.netsim.toJSON());
+    },
+
+    /** Ввід у JSON-режимі (текстовий кадр): далі та сама валідація, що й у бінарного. */
+    input(conn, message) {
+      conn.netsim.schedule('in', () => handleInput(conn, message, 0));
+    },
   };
 
-  function onMessage(conn, data, isBinary) {
-    if (isBinary) {
-      return violate(
+  /** Передає ввід матчу; систематичні читерські значення призводять до відключення. */
+  function handleInput(conn, message, bytes) {
+    if (!conn.inMatch) return;
+    const result = conn.match.submitInput(conn.player.id, message, { bytes });
+    if (result.rejected === 0) return;
+    stats.rejectedInputs += result.rejected;
+    conn.badInputs += result.rejected;
+    if (conn.badInputs >= MAX_BAD_INPUTS) {
+      violate(
         conn,
-        CloseCode.UNSUPPORTED_DATA,
-        'binary_frame',
-        'бінарні кадри не підтримуються',
+        CloseCode.POLICY_VIOLATION,
+        'cheat_suspected',
+        `некоректний ввід: ${result.reason}`,
       );
     }
-    if (!conn.bucket.take()) {
+  }
+
+  /** Бінарний кадр: INPUT іде в матч, PING - назад як PONG (через емулятор мережі). */
+  function onBinary(conn, data) {
+    if (!conn.inputBucket.take()) {
+      return violate(
+        conn,
+        CloseCode.POLICY_VIOLATION,
+        'rate_limited',
+        'перевищено ліміт повідомлень',
+      );
+    }
+    let message;
+    try {
+      message = binaryCodec.decode(data);
+    } catch {
+      return violate(conn, CloseCode.UNSUPPORTED_DATA, 'binary_frame', 'некоректний бінарний кадр');
+    }
+    const bytes = data.byteLength;
+    if (message.type === MsgType.INPUT) {
+      return conn.netsim.schedule('in', () => handleInput(conn, message, bytes));
+    }
+    if (message.type === MsgType.PING) {
+      return conn.netsim.schedule('in', () =>
+        sendGame(
+          conn,
+          binaryCodec.encode({
+            type: MsgType.PONG,
+            clientTime: message.clientTime,
+            serverTick: conn.match?.tick ?? 0,
+          }),
+        ),
+      );
+    }
+    return violate(conn, CloseCode.POLICY_VIOLATION, 'unknown_type', 'неочікуваний бінарний кадр');
+  }
+
+  function onMessage(conn, data, isBinary) {
+    if (isBinary) return onBinary(conn, data);
+    // Ввід у JSON-режимі йде з частотою тіків: власне відро, щоб не вичерпати ліміт чату/керування.
+    const bucket = isInputFrame(data) ? conn.inputBucket : conn.bucket;
+    if (!bucket.take()) {
       return violate(
         conn,
         CloseCode.POLICY_VIOLATION,
@@ -215,8 +344,33 @@ export function attachWebSocketServer({ server, rooms, config, logger }) {
         refillPerSec: wsConfig.rateLimitPerSec,
       }),
       authTimer: null,
+      // Ігровий стан з'єднання: матч, емулятор мережі, окреме відро для вводу.
+      inMatch: false,
+      match: null,
+      badInputs: 0,
+      netsim: new NetSim(),
+      inputBucket: new TokenBucket({
+        capacity: wsConfig.inputRateLimitBurst,
+        refillPerSec: wsConfig.inputRateLimitPerSec,
+      }),
     };
     connections.add(conn);
+
+    // Емуляція мережі з адреси: /ws?latency=100&jitter=30&drop=0.02 (або повідомленням netsim).
+    const query = new URL(request.url ?? '/ws', 'http://localhost').searchParams;
+    if (['latency', 'jitter', 'drop'].some((key) => query.has(key))) {
+      const requested = parseNetsimParams(Object.fromEntries(query));
+      if (!wsConfig.netsimEnabled) {
+        logger.warn('емуляцію мережі вимкнено: параметри адреси ігноруються', { conn: conn.id });
+      } else if (requested.ok) {
+        conn.netsim.update(requested.value);
+      } else {
+        logger.warn('некоректні параметри емуляції мережі', {
+          conn: conn.id,
+          error: requested.error,
+        });
+      }
+    }
     stats.accepted += 1;
 
     // ОБОВ'ЯЗКОВО: без цього обробника помилка сокета (скидання з'єднання, надто великий кадр)
@@ -242,6 +396,7 @@ export function attachWebSocketServer({ server, rooms, config, logger }) {
 
     socket.on('close', () => {
       clearTimeout(conn.authTimer);
+      conn.netsim.dispose();
       connections.delete(conn);
       leaveRoom(conn);
     });

@@ -5,7 +5,7 @@
  */
 
 import { SPRITE_SHEETS, ASTEROID_VARIANTS, asteroidFrameName } from './atlas.js';
-import { createRng } from '../sim/rng.js';
+import { createRng } from '@dogfight/shared';
 
 const TAU = Math.PI * 2;
 
