@@ -1,6 +1,14 @@
 /**
- * Світ: сховище сутностей на Map, один крок симуляції та правила гри
- * (наслідки зіткнень, шкода, вибухи, респаун, очки, поява астероїдів і бонусів).
+ * Світ: сховище сутностей на Map, один крок симуляції, правила гри (наслідки зіткнень, шкода,
+ * вибухи, респаун, очки, поява астероїдів і бонусів) і шина подій.
+ *
+ * Шина подій: World успадковує EventTarget і диспатчить CustomEvent про ігрові події:
+ *   fired         { shooter, bullet, missile }
+ *   hit           { target, source, damage, destroyed }
+ *   exploded      { entity, kind, size, x, y }
+ *   pickup        { collector, pickup, effect }
+ *   scoreChanged  { score, delta }
+ * Симуляція нічого не знає про її споживачів (звук, HUD, мережа): вони самі підписуються.
  */
 
 import { Kind } from './entity.js';
@@ -30,14 +38,43 @@ export const WORLD_RULES = Object.freeze({
   bounce: 0.8, // пружність зіткнень
 });
 
-export class World {
+/** Межі для правил, що приходять ззовні (arena.json, параметри кімнати). */
+const RULE_LIMITS = Object.freeze({
+  initialAsteroids: [0, 40],
+  minAsteroids: [0, 40],
+  asteroidRefillDelay: [0.2, 60],
+  hunterChance: [0, 1],
+  respawnDelay: [0, 10],
+  respawnInvulnerability: [0, 10],
+  pickupInterval: [1, 120],
+  maxPickups: [0, 10],
+});
+
+/**
+ * Накладає перевірені перевизначення на WORLD_RULES. Невідомі ключі й нечислові значення
+ * ігноруються, числа обмежуються безпечним діапазоном: дані з мережі не можуть зламати світ.
+ */
+export function mergeRules(...overrides) {
+  const rules = { ...WORLD_RULES };
+  for (const source of overrides) {
+    if (!source || typeof source !== 'object') continue;
+    for (const [key, [min, max]] of Object.entries(RULE_LIMITS)) {
+      const value = source[key];
+      if (Number.isFinite(value)) rules[key] = Math.min(max, Math.max(min, value));
+    }
+  }
+  return Object.freeze(rules);
+}
+
+export class World extends EventTarget {
   /** Сховище сутностей: Map<id, Entity>. Порядок обходу = порядок додавання. */
   #entities = new Map();
+  #rules;
   #rng;
   #player = null;
   #respawnTimer = null; // секунди до відродження або null, якщо гравець живий
-  #refillTimer = WORLD_RULES.asteroidRefillDelay;
-  #pickupTimer = WORLD_RULES.pickupInterval;
+  #refillTimer;
+  #pickupTimer;
   #score = 0;
 
   /**
@@ -45,11 +82,20 @@ export class World {
    * @param {number} options.width розмір арени, CSS-пікселі
    * @param {number} options.height
    * @param {number} [options.seed] seed детермінованого генератора
+   * @param {object} [options.rules] перевизначення правил (arena.json + параметри кімнати)
    */
-  constructor({ width, height, seed = 1 }) {
+  constructor({ width, height, seed = 1, rules = {} }) {
+    super();
     this.width = width;
     this.height = height;
+    this.#rules = mergeRules(rules);
     this.#rng = createRng(seed);
+    this.#refillTimer = this.#rules.asteroidRefillDelay;
+    this.#pickupTimer = this.#rules.pickupInterval;
+  }
+
+  get rules() {
+    return this.#rules;
   }
 
   get player() {
@@ -68,6 +114,11 @@ export class World {
   setSize(width, height) {
     this.width = width;
     this.height = height;
+  }
+
+  /** Диспатчить ігрову подію шини. */
+  emit(type, detail = {}) {
+    this.dispatchEvent(new CustomEvent(type, { detail }));
   }
 
   // --- Керування сутностями ---
@@ -115,7 +166,7 @@ export class World {
   populate() {
     const cx = this.width / 2;
     const cy = this.height / 2;
-    for (let i = 0; i < WORLD_RULES.initialAsteroids; i += 1) {
+    for (let i = 0; i < this.#rules.initialAsteroids; i += 1) {
       let x;
       let y;
       do {
@@ -183,7 +234,7 @@ export class World {
     if (pair) return this.#shipHitsAsteroid(...pair);
 
     pair = pick(Kind.SHIP, Kind.PICKUP);
-    if (pair) return void applyPickup(...pair);
+    if (pair) return this.#shipTakesPickup(...pair);
 
     if (a.kind === Kind.ASTEROID && b.kind === Kind.ASTEROID) return this.#bounce(a, b);
     return undefined;
@@ -191,15 +242,26 @@ export class World {
 
   #bulletHitsAsteroid(bullet, asteroid) {
     bullet.alive = false;
-    if (asteroid.takeDamage(bullet.damage)) this.#destroyAsteroid(asteroid);
+    const destroyed = asteroid.takeDamage(bullet.damage);
+    this.emit('hit', { target: asteroid, source: bullet, damage: bullet.damage, destroyed });
+    if (destroyed) this.#destroyAsteroid(asteroid);
   }
 
   #shipHitsAsteroid(ship, asteroid) {
     this.#bounce(ship, asteroid);
     if (ship.invulnerable > 0) return;
 
-    if (ship.takeDamage(WORLD_RULES.contactDamagePerSize * asteroid.size)) this.#destroyShip(ship);
-    if (asteroid.takeDamage(WORLD_RULES.ramDamage)) this.#destroyAsteroid(asteroid);
+    const damage = this.#rules.contactDamagePerSize * asteroid.size;
+    const shipDestroyed = ship.takeDamage(damage);
+    this.emit('hit', { target: ship, source: asteroid, damage, destroyed: shipDestroyed });
+    if (shipDestroyed) this.#destroyShip(ship);
+
+    if (asteroid.takeDamage(this.#rules.ramDamage)) this.#destroyAsteroid(asteroid);
+  }
+
+  #shipTakesPickup(ship, pickup) {
+    const { effect } = pickup.components.pickup;
+    if (applyPickup(ship, pickup)) this.emit('pickup', { collector: ship, pickup, effect });
   }
 
   /** Пружне зіткнення двох кіл: маси пропорційні площі, розведення за перекриттям. */
@@ -235,9 +297,15 @@ export class World {
 
   // --- Знищення, вибухи, очки ---
 
+  #addScore(delta) {
+    this.#score += delta;
+    this.emit('scoreChanged', { score: this.#score, delta });
+  }
+
   #destroyAsteroid(asteroid) {
-    this.#score += asteroid.score;
     const { x, y } = asteroid.pos;
+    this.emit('exploded', { entity: asteroid, kind: Kind.ASTEROID, size: asteroid.size, x, y });
+    this.#addScore(asteroid.score);
     this.spawn(
       new Explosion({
         x,
@@ -270,10 +338,12 @@ export class World {
   }
 
   #destroyShip(ship) {
+    const { x, y } = ship.pos;
+    this.emit('exploded', { entity: ship, kind: Kind.SHIP, size: 0, x, y });
     this.spawn(
       new Explosion({
-        x: ship.pos.x,
-        y: ship.pos.y,
+        x,
+        y,
         rng: this.#rng,
         count: 42,
         speed: 240,
@@ -281,7 +351,7 @@ export class World {
         tint: 'ship',
       }),
     );
-    this.#respawnTimer = WORLD_RULES.respawnDelay;
+    this.#respawnTimer = this.#rules.respawnDelay;
   }
 
   // --- Поява та відродження ---
@@ -297,8 +367,8 @@ export class World {
       velocityY = Math.sin(direction) * speed;
     }
     const asteroid = new Asteroid({ x, y, vx: velocityX, vy: velocityY, size, rng: this.#rng });
-    const isHunter = hunter ?? this.#rng() < WORLD_RULES.hunterChance;
-    if (isHunter) attachHoming(asteroid, WORLD_RULES.hunter);
+    const isHunter = hunter ?? this.#rng() < this.#rules.hunterChance;
+    if (isHunter) attachHoming(asteroid, this.#rules.hunter);
     return asteroid;
   }
 
@@ -310,23 +380,23 @@ export class World {
 
   #updateSpawners(dt) {
     // Нові астероїди виходять із випадкового краю арени.
-    if (this.#countOf(Kind.ASTEROID) < WORLD_RULES.minAsteroids) {
+    if (this.#countOf(Kind.ASTEROID) < this.#rules.minAsteroids) {
       this.#refillTimer -= dt;
       if (this.#refillTimer <= 0) {
-        this.#refillTimer = WORLD_RULES.asteroidRefillDelay;
+        this.#refillTimer = this.#rules.asteroidRefillDelay;
         const onVerticalEdge = this.#rng() < 0.5;
         const x = onVerticalEdge ? (this.#rng() < 0.5 ? 0 : this.width) : this.#rng() * this.width;
         const y = onVerticalEdge ? this.#rng() * this.height : this.#rng() < 0.5 ? 0 : this.height;
         this.spawn(this.#createAsteroid({ x, y, size: 3 }));
       }
     } else {
-      this.#refillTimer = WORLD_RULES.asteroidRefillDelay;
+      this.#refillTimer = this.#rules.asteroidRefillDelay;
     }
 
     this.#pickupTimer -= dt;
     if (this.#pickupTimer <= 0) {
-      this.#pickupTimer = WORLD_RULES.pickupInterval;
-      if (this.#countOf(Kind.PICKUP) < WORLD_RULES.maxPickups) {
+      this.#pickupTimer = this.#rules.pickupInterval;
+      if (this.#countOf(Kind.PICKUP) < this.#rules.maxPickups) {
         const types = Object.keys(PICKUP_EFFECTS);
         const type = types[Math.floor(this.#rng() * types.length)];
         const margin = 60;
@@ -344,7 +414,7 @@ export class World {
 
     this.#respawnTimer = null;
     const point = this.#findSafePoint();
-    this.#player.respawnAt(point.x, point.y, WORLD_RULES.respawnInvulnerability);
+    this.#player.respawnAt(point.x, point.y, this.#rules.respawnInvulnerability);
     this.spawn(this.#player);
   }
 
@@ -354,7 +424,7 @@ export class World {
     let best = new Vector2(this.width / 2, this.height / 2);
     let bestClearance = -Infinity;
 
-    for (let i = 0; i < WORLD_RULES.safePointCandidates; i += 1) {
+    for (let i = 0; i < this.#rules.safePointCandidates; i += 1) {
       const x = margin + this.#rng() * Math.max(1, this.width - 2 * margin);
       const y = margin + this.#rng() * Math.max(1, this.height - 2 * margin);
       let clearance = Infinity;

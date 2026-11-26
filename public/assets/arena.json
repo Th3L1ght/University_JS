@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": {
+    "initialAsteroids": 6,
+    "minAsteroids": 5,
+    "asteroidRefillDelay": 2.5,
+    "hunterChance": 0.3,
+    "respawnDelay": 2,
+    "respawnInvulnerability": 2,
+    "pickupInterval": 9,
+    "maxPickups": 2
+  }
+}

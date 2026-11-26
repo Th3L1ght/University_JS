@@ -1,0 +1,64 @@
+{
+  "rooms": [
+    {
+      "id": "training",
+      "name": "Тренувальний полігон",
+      "map": "Open Space",
+      "mode": "Sandbox",
+      "players": 1,
+      "maxPlayers": 8,
+      "arena": {
+        "initialAsteroids": 4,
+        "minAsteroids": 3,
+        "hunterChance": 0.1,
+        "pickupInterval": 6,
+        "seed": 101
+      }
+    },
+    {
+      "id": "belt",
+      "name": "Пояс астероїдів",
+      "map": "Asteroid Belt",
+      "mode": "Survival",
+      "players": 3,
+      "maxPlayers": 8,
+      "arena": {
+        "initialAsteroids": 9,
+        "minAsteroids": 8,
+        "hunterChance": 0.3,
+        "pickupInterval": 9,
+        "seed": 202
+      }
+    },
+    {
+      "id": "hunters",
+      "name": "Полювання",
+      "map": "Red Nebula",
+      "mode": "Hunters",
+      "players": 5,
+      "maxPlayers": 8,
+      "arena": {
+        "initialAsteroids": 6,
+        "minAsteroids": 6,
+        "hunterChance": 0.85,
+        "pickupInterval": 7,
+        "seed": 303
+      }
+    },
+    {
+      "id": "full",
+      "name": "Зал слави (заповнено)",
+      "map": "Arena Prime",
+      "mode": "Deathmatch",
+      "players": 8,
+      "maxPlayers": 8,
+      "arena": {
+        "initialAsteroids": 5,
+        "minAsteroids": 5,
+        "hunterChance": 0.5,
+        "pickupInterval": 8,
+        "seed": 404
+      }
+    }
+  ]
+}

@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Dogfight - Lab 1</title>
+    <title>Dogfight - Lab 3</title>
     <style>
       html,
       body {
@@ -18,10 +18,175 @@
         width: 100vw;
         height: 100vh;
       }
+
+      #ui-root {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+      }
+
+      .lobby {
+        pointer-events: auto;
+        box-sizing: border-box;
+        width: min(540px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
+        overflow: auto;
+        padding: 24px;
+        border: 1px solid rgba(95, 215, 255, 0.35);
+        border-radius: 14px;
+        background: rgba(8, 14, 26, 0.9);
+        color: #dbe9ff;
+        font:
+          14px ui-monospace,
+          Menlo,
+          Consolas,
+          monospace;
+      }
+
+      .lobby[hidden],
+      .lobby__error[hidden] {
+        display: none;
+      }
+
+      .lobby__title {
+        margin: 0;
+        font-size: 28px;
+        letter-spacing: 0.08em;
+        text-align: center;
+      }
+
+      .lobby__subtitle {
+        margin: 6px 0 18px;
+        text-align: center;
+        color: rgba(190, 215, 255, 0.65);
+      }
+
+      .lobby__label {
+        display: block;
+        margin-bottom: 14px;
+        color: rgba(190, 215, 255, 0.75);
+      }
+
+      .lobby__input {
+        box-sizing: border-box;
+        display: block;
+        width: 100%;
+        margin-top: 6px;
+        padding: 10px 12px;
+        border: 1px solid rgba(95, 215, 255, 0.4);
+        border-radius: 8px;
+        background: rgba(5, 12, 22, 0.9);
+        color: #f2f8ff;
+        font: inherit;
+      }
+
+      .lobby__input:focus-visible,
+      .lobby__room:focus-visible,
+      .lobby__button:focus-visible {
+        outline: 2px solid #5fd7ff;
+        outline-offset: 2px;
+      }
+
+      .lobby__rooms {
+        display: grid;
+        gap: 8px;
+        margin: 0 0 12px;
+        padding: 0;
+        list-style: none;
+      }
+
+      .lobby__room {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 2px 12px;
+        padding: 10px 12px;
+        border: 1px solid rgba(190, 215, 255, 0.2);
+        border-radius: 10px;
+        background: rgba(15, 26, 44, 0.7);
+        cursor: pointer;
+      }
+
+      .lobby__room:hover {
+        border-color: rgba(95, 215, 255, 0.55);
+      }
+
+      .lobby__room--selected {
+        border-color: #5fd7ff;
+        background: rgba(95, 215, 255, 0.12);
+      }
+
+      .lobby__room--full {
+        opacity: 0.5;
+      }
+
+      .lobby__room-name {
+        font-weight: 700;
+      }
+
+      .lobby__room-players {
+        text-align: right;
+        color: #8fe9ff;
+      }
+
+      .lobby__room-meta,
+      .lobby__room-params {
+        color: rgba(190, 215, 255, 0.6);
+        font-size: 12px;
+      }
+
+      .lobby__room-params {
+        text-align: right;
+      }
+
+      .lobby__status {
+        margin: 0 0 8px;
+        color: rgba(190, 215, 255, 0.55);
+        font-size: 12px;
+      }
+
+      .lobby__error {
+        margin: 0 0 10px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(255, 107, 90, 0.14);
+        color: #ffb3a8;
+        font-size: 12px;
+      }
+
+      .lobby__actions {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+      }
+
+      .lobby__button {
+        padding: 10px 22px;
+        border: 0;
+        border-radius: 8px;
+        background: #5fd7ff;
+        color: #05121f;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .lobby__button--secondary {
+        background: rgba(190, 215, 255, 0.16);
+        color: #dbe9ff;
+      }
+
+      .lobby__button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
     </style>
   </head>
   <body>
     <canvas id="game"></canvas>
+    <div id="ui-root"></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

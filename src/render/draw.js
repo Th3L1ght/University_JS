@@ -1,11 +1,13 @@
 /**
- * Відмальовування кадру: тло, усі сутності світу з інтерполяцією, HUD.
+ * Відмальовування кадру: тло, усі сутності світу зі спрайтів з інтерполяцією, HUD.
  * Стан симуляції тут лише читається.
  */
 
 import { lerp, lerpAngle, TAU } from '../math.js';
 import { Kind } from '../sim/entity.js';
 import { createRng } from '../sim/rng.js';
+import { asteroidFrameName, ASTEROID_VARIANTS } from '../assets/atlas.js';
+import { drawSprite } from './sprites.js';
 
 const GRID_SIZE = 80;
 const STAR_COUNT = 160;
@@ -26,7 +28,8 @@ function createStars(count) {
   }));
 }
 
-function drawBackground(ctx, view) {
+/** Тло: сітка й зорі. Використовується і грою, і екранами завантаження та лобі. */
+export function drawBackground(ctx, view) {
   ctx.fillStyle = '#05070d';
   ctx.fillRect(0, 0, view.width, view.height);
 
@@ -57,131 +60,44 @@ function paintShip(ctx, ship, state) {
   // Невразливе судно блимає.
   if (ship.invulnerable > 0) ctx.globalAlpha = 0.45 + 0.35 * Math.sin(state.now / 45);
 
-  if (ship.thrust) {
-    const flicker = 0.5 + 0.5 * Math.sin(state.now / 35);
-    const length = 12 + 10 * flicker;
-    ctx.fillStyle = '#ff9a2e';
+  // Бонус rapid fire підсвічується золотим кільцем.
+  if (ship.hasBuff('rapid')) {
+    ctx.strokeStyle = 'rgba(255, 216, 74, 0.75)';
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(-8, -5);
-    ctx.lineTo(-8 - length, 0);
-    ctx.lineTo(-8, 5);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.fillStyle = '#ffe38a';
-    ctx.beginPath();
-    ctx.moveTo(-8, -2.5);
-    ctx.lineTo(-8 - length * 0.55, 0);
-    ctx.lineTo(-8, 2.5);
-    ctx.closePath();
-    ctx.fill();
+    ctx.arc(0, 0, ship.radius + 6, 0, TAU);
+    ctx.stroke();
   }
 
-  ctx.fillStyle = '#0d1b2e';
-  ctx.strokeStyle = ship.hasBuff('rapid') ? '#ffd84a' : '#5fd7ff';
-  ctx.lineWidth = 2;
-  ctx.lineJoin = 'round';
-  ctx.beginPath();
-  ctx.moveTo(18, 0);
-  ctx.lineTo(-12, -11);
-  ctx.lineTo(-6, 0);
-  ctx.lineTo(-12, 11);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
+  const sheet = state.sheets.sprites;
+  // Полум'я двигуна: два кадри, що чергуються (~16 разів на секунду).
+  if (ship.thrust) {
+    const frame = Math.floor(state.now / 60) % 2 === 0 ? 'flame_a' : 'flame_b';
+    drawSprite(ctx, sheet, frame, { dx: -24 });
+  }
+  drawSprite(ctx, sheet, 'ship');
 }
 
 function paintBullet(ctx, bullet, state) {
-  if (bullet.components.homing) {
-    // Ракета: подовжене тіло з полум'ям.
-    const flicker = 0.5 + 0.5 * Math.sin(state.now / 30);
-    ctx.fillStyle = '#ff7a2e';
-    ctx.beginPath();
-    ctx.moveTo(-6, -2.5);
-    ctx.lineTo(-12 - 6 * flicker, 0);
-    ctx.lineTo(-6, 2.5);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.fillStyle = '#ffd9a8';
-    ctx.strokeStyle = '#ff9a2e';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(8, 0);
-    ctx.lineTo(-6, -3.5);
-    ctx.lineTo(-6, 3.5);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    return;
-  }
-
-  ctx.strokeStyle = 'rgba(120, 230, 255, 0.55)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(-9, 0);
-  ctx.lineTo(0, 0);
-  ctx.stroke();
-  ctx.fillStyle = '#e8fbff';
-  ctx.beginPath();
-  ctx.arc(0, 0, 2.6, 0, TAU);
-  ctx.fill();
+  const frame = bullet.components.homing ? 'missile' : 'bullet';
+  drawSprite(ctx, state.sheets.sprites, frame);
 }
 
-function paintAsteroid(ctx, asteroid) {
+function paintAsteroid(ctx, asteroid, state) {
   const hunter = Boolean(asteroid.components.homing);
-  ctx.fillStyle = hunter ? '#241216' : '#121a28';
-  ctx.strokeStyle = hunter ? '#ff6b5a' : '#9aa7b8';
-  ctx.lineWidth = 2;
-  ctx.lineJoin = 'round';
-  ctx.beginPath();
-  const count = asteroid.shape.length;
-  for (let i = 0; i < count; i += 1) {
-    const angle = (i / count) * TAU;
-    const r = asteroid.radius * asteroid.shape[i];
-    const x = Math.cos(angle) * r;
-    const y = Math.sin(angle) * r;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
+  const variant = asteroid.id % ASTEROID_VARIANTS;
+  drawSprite(ctx, state.sheets.asteroids, asteroidFrameName(asteroid.size, variant, hunter));
 }
 
 function paintPickup(ctx, pickup, state) {
   const { effect } = pickup.components.pickup;
-  const color = effect.type === 'heal' ? '#5dff9a' : '#ffd84a';
   const remaining = pickup.components.lifetime?.remaining ?? Infinity;
   // Перед зникненням бонус блимає.
   if (remaining < 3) ctx.globalAlpha = 0.45 + 0.4 * Math.sin(state.now / 70);
 
   const pulse = 1 + 0.08 * Math.sin(state.now / 200);
-  ctx.strokeStyle = color;
-  ctx.fillStyle = `${color}26`;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(0, 0, pickup.radius * pulse, 0, TAU);
-  ctx.fill();
-  ctx.stroke();
-
-  ctx.lineWidth = 3;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  if (effect.type === 'heal') {
-    ctx.moveTo(-6, 0);
-    ctx.lineTo(6, 0);
-    ctx.moveTo(0, -6);
-    ctx.lineTo(0, 6);
-  } else {
-    ctx.moveTo(-6, -5);
-    ctx.lineTo(0, 0);
-    ctx.lineTo(-6, 5);
-    ctx.moveTo(1, -5);
-    ctx.lineTo(7, 0);
-    ctx.lineTo(1, 5);
-  }
-  ctx.stroke();
+  const frame = effect.type === 'heal' ? 'pickup_heal' : 'pickup_rapid';
+  drawSprite(ctx, state.sheets.sprites, frame, { scale: pulse });
 }
 
 /** Вибух малює частинки в координатах світу (без translate/rotate). */
@@ -212,16 +128,17 @@ const PAINTERS = {
 
 const DRAW_ORDER = [Kind.PICKUP, Kind.ASTEROID, Kind.BULLET, Kind.SHIP, Kind.EXPLOSION];
 
-function drawEntity(ctx, view, entity, painter, alpha, now) {
+function drawEntity(ctx, view, entity, painter, state) {
   if (entity.kind === Kind.EXPLOSION) {
-    painter(ctx, entity, { alpha, now });
+    painter(ctx, entity, state);
     return;
   }
 
-  const x = lerp(entity.prevPos.x, entity.pos.x, alpha);
-  const y = lerp(entity.prevPos.y, entity.pos.y, alpha);
-  const angle = lerpAngle(entity.prevAngle, entity.angle, alpha);
-  const margin = entity.radius + 24;
+  const x = lerp(entity.prevPos.x, entity.pos.x, state.alpha);
+  const y = lerp(entity.prevPos.y, entity.pos.y, state.alpha);
+  const angle = lerpAngle(entity.prevAngle, entity.angle, state.alpha);
+  // Спрайт астероїда трохи більший за коло зіткнень, тому запас по краях ширший.
+  const margin = entity.radius * 1.4 + 24;
 
   // Сутність біля краю малюється ще й з протилежного боку: перенос виглядає безшовним.
   for (const offsetX of [-view.width, 0, view.width]) {
@@ -234,24 +151,24 @@ function drawEntity(ctx, view, entity, painter, alpha, now) {
       ctx.save();
       ctx.translate(px, py);
       ctx.rotate(angle);
-      painter(ctx, entity, { alpha, now });
+      painter(ctx, entity, state);
       ctx.restore();
     }
   }
 }
 
-function drawEntities(ctx, view, world, alpha, now) {
+function drawEntities(ctx, view, world, state) {
   for (const kind of DRAW_ORDER) {
     const painter = PAINTERS[kind];
     for (const entity of world.ofKind(kind)) {
-      if (entity.alive) drawEntity(ctx, view, entity, painter, alpha, now);
+      if (entity.alive) drawEntity(ctx, view, entity, painter, state);
     }
   }
 }
 
 // --- HUD ---
 
-function drawHud(ctx, view, world, metrics) {
+function drawHud(ctx, view, world, metrics, session) {
   ctx.save();
   ctx.font = HUD_FONT;
   ctx.textBaseline = 'top';
@@ -283,6 +200,16 @@ function drawHud(ctx, view, world, metrics) {
     }
   }
 
+  // Пілот і кімната (праворуч угорі).
+  if (session) {
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(190, 215, 255, 0.9)';
+    ctx.fillText(session.nickname, view.width - 14, 12);
+    ctx.fillStyle = 'rgba(190, 215, 255, 0.55)';
+    ctx.fillText(session.roomName, view.width - 14, 32);
+    ctx.textAlign = 'start';
+  }
+
   if (world.respawnIn > 0) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -300,7 +227,7 @@ function drawHud(ctx, view, world, metrics) {
   ctx.textBaseline = 'bottom';
   ctx.fillStyle = 'rgba(190, 215, 255, 0.6)';
   ctx.fillText(
-    '← → / A D: поворот    ↑ / W: тяга    Пробіл: вогонь    X / E: ракета',
+    '← → / A D: поворот    ↑ / W: тяга    Пробіл: вогонь    X / E: ракета    M: звук',
     14,
     view.height - 12,
   );
@@ -314,9 +241,11 @@ function drawHud(ctx, view, world, metrics) {
  * @param {number} alpha частка кроку симуляції [0, 1) для інтерполяції
  * @param {{ stepsPerSec: number, fps: number, frameTimeMs: number }} metrics
  * @param {number} now поточний час, мс (лише для анімацій)
+ * @param {Record<string, object>} sheets завантажені спрайт-листи (loadAll().sprites)
+ * @param {{ nickname: string, roomName: string } | null} [session]
  */
-export function drawFrame(ctx, view, world, alpha, metrics, now) {
+export function drawFrame(ctx, view, world, alpha, metrics, now, sheets, session = null) {
   drawBackground(ctx, view);
-  drawEntities(ctx, view, world, alpha, now);
-  drawHud(ctx, view, world, metrics);
+  drawEntities(ctx, view, world, { alpha, now, sheets });
+  drawHud(ctx, view, world, metrics, session);
 }

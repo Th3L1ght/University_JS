@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Dogfight: Lab 1 - The Event Loop Is the Game Loop",
+  "description": "Dogfight: Lab 3 - Asynchronous JavaScript",
   "engines": {
     "node": ">=22"
   },
@@ -13,7 +13,8 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "assets:generate": "node scripts/generate_assets.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

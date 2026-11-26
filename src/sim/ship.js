@@ -172,7 +172,9 @@ export class Ship extends Entity {
       damage: p.bulletDamage,
       ttl: p.bulletTtl,
     });
-    return this.world.spawn(bullet);
+    this.world.spawn(bullet);
+    this.world.emit('fired', { shooter: this, bullet, missile: false });
+    return bullet;
   }
 
   /**
@@ -198,6 +200,8 @@ export class Ship extends Entity {
       range: p.missileRange,
       targetKinds: [Kind.ASTEROID],
     });
-    return this.world.spawn(missile);
+    this.world.spawn(missile);
+    this.world.emit('fired', { shooter: this, bullet: missile, missile: true });
+    return missile;
   }
 }
