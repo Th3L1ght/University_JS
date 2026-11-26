@@ -11,17 +11,20 @@
  *    (див. fallback.js).
  */
 
+import { backoffDelay } from '../util/backoff.js';
 import { log } from '../util/log.js';
 import { buildEmbeddedManifest, synthAudioBuffer } from './fallback.js';
 
 // --- Помилки ---
 
 export class HttpError extends Error {
-  constructor(status, url, statusText = '') {
+  /** @param {unknown} [body] розібране JSON-тіло відповіді з помилкою (якщо воно було) */
+  constructor(status, url, statusText = '', body = null) {
     super(`HTTP ${status}${statusText ? ` ${statusText}` : ''}: ${url}`);
     this.name = 'HttpError';
     this.status = status;
     this.url = url;
+    this.body = body;
   }
 }
 
@@ -133,15 +136,19 @@ export function sleep(ms, signal) {
 
 // --- Мережеві утиліти ---
 
-async function fetchOk(url, { signal } = {}) {
+async function fetchOk(url, { signal, ...init } = {}) {
   let response;
   try {
-    response = await fetch(url, { signal });
+    response = await fetch(url, { signal, ...init });
   } catch (error) {
     if (isAbortLike(error) || signal?.aborted) throw error;
     throw new NetworkError(url, error);
   }
-  if (!response.ok) throw new HttpError(response.status, url, response.statusText);
+  if (!response.ok) {
+    // Сервер зазвичай пояснює відмову в JSON ({ error, message, details }) - зберігаємо це тіло.
+    const body = await response.json().catch(() => null);
+    throw new HttpError(response.status, url, response.statusText, body);
+  }
   return response;
 }
 
@@ -152,8 +159,17 @@ async function fetchOk(url, { signal } = {}) {
  * @param {string} url
  * @param {{ signal?: AbortSignal }} [options]
  */
-export async function fetchJson(url, { signal } = {}) {
-  const response = await fetchOk(url, { signal });
+export async function fetchJson(url, { signal, json } = {}) {
+  // json !== undefined -> POST із JSON-тілом (створення кімнати); інакше звичайний GET.
+  const init =
+    json === undefined
+      ? {}
+      : {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(json),
+        };
+  const response = await fetchOk(url, { signal, ...init });
   try {
     return await response.json();
   } catch (error) {
@@ -284,8 +300,7 @@ export async function withRetry(
       return await fn(attempt);
     } catch (error) {
       if (attempt >= attempts || !shouldRetry(error)) throw error;
-      const ceiling = baseMs * 2 ** (attempt - 1);
-      const delayMs = Math.round(ceiling / 2 + (random() * ceiling) / 2);
+      const delayMs = backoffDelay(attempt, { baseMs }, random);
       log.warn(
         'retry',
         `спроба ${attempt}/${attempts} невдала (${error.name}: ${error.message}); повтор через ${delayMs} мс`,

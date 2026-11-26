@@ -3,14 +3,14 @@ import globals from 'globals';
 import prettier from 'eslint-config-prettier';
 
 export default [
-  { ignores: ['dist/', 'node_modules/'] },
+  { ignores: ['**/dist/', '**/node_modules/', '**/logs/'] },
   js.configs.recommended,
   {
-    files: ['**/*.js'],
+    files: ['**/*.js', '**/*.mjs'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
-      globals: { ...globals.browser },
+      globals: { ...globals.node },
     },
     rules: {
       eqeqeq: 'error',
@@ -20,8 +20,9 @@ export default [
     },
   },
   {
-    files: ['vite.config.js', 'eslint.config.js', 'scripts/**/*.mjs'],
-    languageOptions: { globals: { ...globals.node } },
+    // Код клієнта працює в браузері.
+    files: ['client/src/**/*.js'],
+    languageOptions: { globals: { ...globals.browser } },
   },
   prettier,
 ];

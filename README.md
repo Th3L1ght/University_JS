@@ -1,483 +1,298 @@
-# Dogfight - Лабораторна робота №3: Asynchronous JavaScript - Promises, async/await, and the Loading Screen
+# Dogfight - Лабораторна робота №4: Node.js - EventEmitter, Streams, and a WebSocket Server
 
-Третій етап гри Dogfight. До моделі сутностей з Лаби №2 додано асинхронний конвеєр завантаження
-ассетів (прогрес-бар, повтори з backoff, скасування запитів), Web Audio через шину подій
-(`EventTarget`), спрайтовий рендеринг і HTTP-лобі перед стартом матчу.
+Четвертий етап гри Dogfight: проєкт став клієнт-серверним монорепозиторієм (npm workspaces).
+**Сервер** на чистому `node:http` і бібліотеці `ws` керує кімнатами, роздає клієнт, веде потокові журнали
+матчів (NDJSON) і віддає їх через REST. **Клієнт** (Vite + Canvas) отримав справжнє лобі: створення
+кімнат, список гравців і чат у реальному часі, кнопку запуску локального матчу та оффлайн-режим.
 
-Потік екранів: **Loading** (Canvas) -> **Lobby** (DOM) -> **Game** (Canvas).
-
-## Можливості
-
-- **Завантаження ассетів**: спрайт-листи SVG, звуки WAV, конфіг арени (`manifest.json`), прогрес
-  `done / total`, повтори лише для мережевих збоїв і 5xx, скасування через `AbortSignal`.
-- **Екран завантаження на Canvas**: реальний прогрес-бар, відсотки, статус ресурсів, що вантажаться, кнопка
-  **Retry** після помилки або таймауту (також клавіша `Enter`).
-- **Шина подій**: `World extends EventTarget` диспатчить `fired`, `hit`, `exploded`, `pickup`,
-  `scoreChanged`; симуляція нічого не знає про споживачів.
-- **Звук (Web Audio API)**: `audio.js` підписується на шину й відтворює ефекти через
-  `AudioBufferSourceNode`; розблокування `AudioContext.resume()` - по кліку **Join**.
-- **Спрайтовий рендеринг**: `ctx.drawImage` із source-прямокутниками, інтерполяція `alpha`, анімоване
-  полум'я двигуна, частинкові вибухи.
-- **HTTP-лобі**: `Lobby extends EventTarget` опитує `api/rooms.json`, кожен запит має
-  `AbortSignal.timeout(3000)`, а вихід у гру миттєво скасовує всі активні запити.
-- **Режим `file://`**: подвійний клік по `index.html` без сервера проходить увесь потік на вбудованих даних.
-- Фіксований крок 1/60 с, судно, кулі, ракети, астероїди, бонуси, респаун - з Лаби №2.
-
-## Керування
-
-| Клавіші           | Дія                                   |
-| ----------------- | ------------------------------------- |
-| `←` `→` / `A` `D` | поворот                               |
-| `↑` / `W`         | тяга                                  |
-| `Пробіл`          | вогонь кулями (утримувати для черги)  |
-| `X` / `E`         | ракета із самонаведенням на астероїди |
-| `M`               | вимкнути / увімкнути звук             |
-| `Enter`           | Retry на екрані помилки завантаження  |
-
-У лобі: ввести нікнейм (2-16 символів), вибрати кімнату, **Оновити** (ручне оновлення списку), **Join**.
-
-## Запуск
+## Швидкий старт
 
 Потрібен Node.js 22 (`.nvmrc`).
 
 ```bash
-nvm use                 # версія з .nvmrc
-npm install
-npm run dev             # сервер розробки Vite (ES-модулі, public/ роздається з кореня)
-npm run build           # збірка в dist/ (public/ копіюється автоматично)
-npm run preview         # перегляд збірки через сервер
-npm run assets:generate # перегенерувати SVG, WAV, manifest.json, arena.json, rooms.json у public/
-npm run lint            # ESLint
-npm run format          # Prettier (запис)
-npm run format:check
+npm install            # встановлює залежності всіх пакетів (client, server)
+npm run build          # збірка клієнта в client/dist
+npm start              # сервер: http://localhost:3000 (віддає client/dist, API і WebSocket)
 ```
 
-### Запуск подвійним кліком (без сервера)
-
-`dist/index.html` відкривається прямо з файлової системи (`file://`). Для цього:
-
-1. `vite.config.js` під час збірки випускає бандл одним класичним IIFE-скриптом, а плагін
-   `file-protocol-compat` замінює в `index.html` `<script type="module" crossorigin ...>` на
-   `<script defer src="./assets/...">`. Усі шляхи відносні (`base: './'`), імена файлів - у нижньому регістрі.
-2. Chrome і Edge блокують `fetch` до сусідніх файлів на `file://` (origin `null`), тому в цьому режимі
-   завантажувач не робить мережевих запитів, а використовує **вбудовані дані** (розділ нижче).
-
-### Параметри налагодження в адресному рядку
-
-| Параметр            | За замовчуванням | Призначення                                                   |
-| ------------------- | ---------------- | ------------------------------------------------------------- |
-| `?requestTimeout=N` | 5000 мс          | таймаут одного запиту завантаження (на кожну спробу)          |
-| `?loadTimeout=N`    | 20000 мс         | загальний таймаут завантаження всіх ассетів                   |
-| `?lobbyPoll=N`      | 5000 мс          | період опитування списку кімнат                               |
-| `?debug`            | вимкнено         | виставляє `globalThis.__dogfight` / `__lobby` для діагностики |
-
-## Структура
-
-```
-index.html            canvas, #ui-root для лобі, стилі
-vite.config.js        base: './', збірка під file://
-eslint.config.js      ESLint (flat config) + eslint-config-prettier
-.prettierrc.json      Prettier: LF, одинарні лапки, ширина 100
-.nvmrc                22
-public/               статичні файли (копіюються в dist/ як є)
-  assets/manifest.json   список ассетів: спрайт-листи з кадрами, звуки, конфіг арени
-  assets/arena.json      правила арени за замовчуванням
-  assets/sprites.svg     корабель, полум'я, кулі, ракета, бонуси
-  assets/asteroids.svg   астероїди: 3 розміри × 3 форми × 2 кольори
-  assets/sounds/*.wav    fire, hit, explosion, pickup
-  api/rooms.json         4 кімнати лобі
-scripts/generate_assets.mjs   генератор усього, що лежить у public/
-src/
-  main.js                       Loading -> Lobby -> Game
-  assets/loader.js              fetchJson, loadImage, loadAudio, withRetry, loadAll, loadGameAssets
-  assets/atlas.js               розкладка атласів і маніфест (єдине джерело правди)
-  assets/sprite_art.js          SVG-графіка спрайтів (чисті функції)
-  assets/sound_synth.js         синтез звуків (чисті функції)
-  assets/fallback.js            вбудований маніфест для file://
-  assets/defaults.js            DEFAULT_ARENA, DEFAULT_ROOMS
-  audio/audio.js                Web Audio, підписка на шину подій
-  lobby/lobby.js                Lobby extends EventTarget (шар даних)
-  lobby/lobby_ui.js             DOM-інтерфейс лобі
-  render/loading_screen.js      екран завантаження на Canvas
-  render/draw.js, sprites.js    спрайтовий рендеринг, HUD
-  render/canvas.js              DPR і зміна розміру
-  sim/*                         світ, сутності, зіткнення (без audio/DOM/ассетів)
-  util/log.js                   логер із префіксами областей
-  loop.js, input.js, math.js    цикл із фіксованим кроком, введення, математика (з Лаби №1)
+```bash
+npm run dev            # режим розробки: Node-сервер (--watch) + Vite на http://localhost:5173
+npm test               # тести обох пакетів (node:test)
+npm run lint           # ESLint по всьому монорепозиторію
+npm run format:check   # Prettier
+npm run start:env      # те саме, що start, але з файлом .env (node --env-file=.env)
 ```
 
-### Структура знімка `Lab_N`
+Конфігурація - змінні середовища, усі необов'язкові: `cp .env.example .env`, потім `npm run start:env`.
+У режимі `npm run dev` Vite проксує `/api` і `/ws` на `http://localhost:3000` (змінна `SERVER_URL`
+змінює адресу), а сервер запускається з `NODE_ENV=development` і статику не віддає.
 
-У `JavaScript_Labs/Lab_N` лежить зібрана версія (`index.html`, `assets/`, `api/`) - вона відкривається
-подвійним кліком, - та вихідні коди для перевірки (`src/`, `public/`, `scripts/`, `package.json`,
-`package-lock.json`, конфіги, `.nvmrc`, `README.md`). Вихідний `index.html` проєкту збережено там як
-`index.source.html`, бо ім'я `index.html` зайняте зібраною сторінкою. Щоб перезібрати: перейменувати
-`index.source.html` на `index.html`, потім `npm install && npm run build`. `node_modules/` і `dist/` у знімок не входять.
+**Подвійний клік по `client/dist/index.html`** (без сервера) працює, як і раніше: ви побачите режим
+«вбудовані дані (file://)» з локальною грою. Без запущеного Node-сервера на звичайному статичному хостингу
+лобі переходить на `./api/rooms.json` (режим «статичний список»).
 
-## Конвеєр завантаження
-
-```
-main.js ── loadGameAssets({ audioCtx, onProgress, signal })
-              │  file:// ?  так -> вбудований маніфест (fallback.js)
-              │             ні  -> withRetry(fetchJson('./assets/manifest.json'))
-              └─ loadAll(manifest)
-                   ├─ критичні  (Promise.all):        arena.json, sprites.svg, asteroids.svg
-                   └─ некритичні (Promise.allSettled): fire/hit/explosion/pickup.wav
-```
-
-### Утиліти (`src/assets/loader.js`)
-
-Кожна приймає `{ signal }` (`AbortSignal`) і негайно завершується, коли його скасовано.
-
-- **`fetchJson(url, { signal })`**: перевіряє `response.ok`; для 404, 500 та інших кидає `HttpError` зі
-  `status`. Мережевий збій -> `NetworkError`, зламаний JSON -> `JsonParseError`.
-- **`loadImage(url, { signal })`**: `Promise` над `new Image()`. Слухачі `load`/`error`/`abort` знімаються
-  за будь-якого результату; при скасуванні знімається `src`. Подія `error` не містить статусу, тому після
-  помилки робиться діагностичний запит `HEAD`: 4xx/5xx -> `HttpError`, немає зв'язку -> `NetworkError`,
-  сервер відповідає -> `ImageLoadError` (повторюваний).
-- **`loadAudio(audioCtx, url, { signal })`**: `fetch` -> `arrayBuffer()` -> `audioCtx.decodeAudioData()`.
-  Помилка декодування -> `AssetDecodeError`. `decodeAudioData` не вміє скасовуватися, тому сигнал
-  перевіряється після нього.
-- **`withRetry(fn, { attempts = 3, baseMs = 200, signal })`**: експоненційний backoff із джитером.
-  Перед спробою `n + 1` чекає `ceiling/2 + random · ceiling/2`, де `ceiling = baseMs · 2^(n-1)` (тобто від 50% до
-  100% «стелі»: 100-200 мс, потім 200-400 мс). Пауза переривається сигналом.
-
-### Що повторюється, а що ні
-
-| Помилка                                             | Повтор | Чому                                                           |
-| --------------------------------------------------- | ------ | -------------------------------------------------------------- |
-| `NetworkError` (немає зв'язку)                      | так    | збій тимчасовий                                                |
-| `TimeoutError` (`AbortSignal.timeout`)              | так    | мережевий збій                                                 |
-| `HttpError` 5xx                                     | так    | збій сервера, може минути                                      |
-| `ImageLoadError` (зображення не відкрилось)         | так    | з боку браузера причина невидима: збій на льоту або битий файл |
-| **`HttpError` 4xx (404, 400, 429, ...)**            | **ні** | запит помилковий, повтор нічого не змінить                     |
-| `JsonParseError`, `AssetDecodeError`, `ConfigError` | ні     | дані пошкоджені, а не недоступні                               |
-| `AbortError` (скасування користувачем)              | ні     | скасовано навмисно                                             |
-
-### `loadAll(manifest, { audioCtx, onProgress, signal })`
-
-- Критичні ассети (конфіг арени, спрайти) вантажаться **паралельно через `Promise.all`**: якщо хоч один
-  не завантажився, весь `loadAll` падає, а решта запитів скасовується внутрішнім `AbortController`
-  (у логах вони позначені `⊘ ... скасовано`, а не як власні збої).
-- Некритичні (звуки) - **через `Promise.allSettled`**: відсутній чи зламаний звук позначається
-  `null`, гра стартує без нього (`failedSounds` у результаті, попередження в консолі).
-- Прогрес: `onProgress({ done, total, ratio, failed, active, last })`, де `total` = усі ассети.
-  Некритичний збій теж рахується як «оброблений», тож бар доходить до 100%.
-- Окремий ключ `sequential: true` вантажить ассети по одному (потрібен лише для порівняння в розділі нижче).
-- Кожен запит має таймаут `requestTimeoutMs` (5 с) на спробу, плюс загальний `loadTimeout` (20 с) у `main.js`.
-
-### Режим `file://` і вбудовані дані
-
-Браузер на `file://` не дозволяє `fetch` до сусідніх файлів, тому `loadGameAssets` у цьому режимі не
-робить жодного мережевого запиту й будує ассети з тих самих функцій, якими `scripts/generate_assets.mjs`
-створює файли в `public/`:
-
-- спрайти: текст SVG із `sprite_art.js`, переданий як **data-URI** у `loadImage` (`new Image()` з data-URI працює і на `file://`);
-- звуки: семпли з `sound_synth.js` -> `audioCtx.createBuffer()` + `copyToChannel()` (без `fetch` і `decodeAudioData`);
-- конфіг арени: `DEFAULT_ARENA`; кімнати лобі: `DEFAULT_ROOMS` (лобі позначає джерело як «вбудовані дані»).
-
-Решта конвеєра - прогрес, `Promise.all`/`allSettled`, екран завантаження, лобі, гра - працює без змін.
-Тест на синхронність: `public/assets/manifest.json` збігається з вбудованим маніфестом, бо обидва
-будуються з `atlas.js`. Перевірено: збірка, відкрита по `file://`, проходить Loading -> Lobby -> Game без
-жодного мережевого запиту й без помилок у консолі.
-
-## Web Audio і шина подій
-
-### Розділення шарів
+## Архітектура монорепозиторію
 
 ```
-sim/*   (World extends EventTarget, диспатчить CustomEvent)
-   ▲
-   │ addEventListener            ← залежність спрямована лише ЗВІДСИ
-audio/audio.js          render/draw.js (читає стан)        lobby/*, main.js
+package.json          workspaces: ["client", "server"]; скрипти dev, build, start, test, lint
+.env.example          усі параметри сервера зі значеннями за замовчуванням
+eslint.config.js      один ESLint-конфіг на весь репозиторій (у client/src - globals браузера)
+scripts/dev.mjs       dev: сервер + Vite одним процесом, Ctrl+C зупиняє обох
+client/               Vite-проєкт із Лаби №3 + мережевий шар
+  vite.config.js        base: './'; у dev проксі /api і /ws -> http://localhost:3000
+  src/net/connection.js WebSocket: черга, диспетчеризація за type, reconnect із backoff
+  src/lobby/            lobby.js (дані: REST + WS-сесія), lobby_ui.js (DOM)
+  src/util/backoff.js   спільний експоненційний backoff із джитером
+  test/                 node:test: connection (+ реальний сервер), lobby
+server/               пакет "type": "module", єдина залежність - ws
+  src/config.js         змінні середовища -> заморожений об'єкт, усі помилки разом
+  src/index.js          createApp(): HTTP + WS + кімнати + журнали; graceful shutdown; main()
+  src/http.js           маршрутизація, REST, статика, захист від path traversal
+  src/protocol.js       протокол v1: схеми, коди закриття, перевірка створення кімнат
+  src/rooms.js          Room extends EventEmitter, RoomManager
+  src/ws.js             WebSocketServer: auth-таймаут, heartbeat, rate limit, slow client
+  src/rate_limit.js     TokenBucket
+  src/log/matchlog.js   Transform (objectMode) -> NDJSON -> файл через pipeline
+  src/log/replay.js     async function* readReplay(): розбір NDJSON по рядках
+  src/logger.js         структурований логер
+  test/                 117 тестів node:test (protocol, rooms, config, matchlog, http, ws)
 ```
 
-`src/sim/*` не імпортує `audio.js`, ассети, рендер, лобі чи DOM-модулі й не звертається до
-`document`/`window`/`canvas`. Це перевіряється автоматично (аналіз імпортів і тексту модулів `sim/`).
-`EventTarget` і `CustomEvent` - стандартні глобальні об'єкти, доступні й у Node, тому симуляція
-тестується без браузера.
-
-### Події
-
-| Подія          | Коли                                        | `detail`                                |
-| -------------- | ------------------------------------------- | --------------------------------------- |
-| `fired`        | постріл кулею чи ракетою                    | `{ shooter, bullet, missile }`          |
-| `hit`          | куля влучила в астероїд, астероїд - у судно | `{ target, source, damage, destroyed }` |
-| `exploded`     | знищено астероїд чи судно                   | `{ entity, kind, size, x, y }`          |
-| `pickup`       | судно підібрало бонус                       | `{ collector, pickup, effect }`         |
-| `scoreChanged` | змінилися очки                              | `{ score, delta }`                      |
-
-### `audio.js`
-
-- `createAudioContext()` створює `AudioContext` (спершу `suspended`: декодувати ассети можна вже зараз).
-- `createAudioSystem({ audioCtx, sounds })` повертає `attach(bus)` (підписка на `World`, повертає функцію
-  відписки), `unlock()`, `play(id)`, `toggleMute()`.
-- Відтворення: `createBufferSource()` -> `GainNode` -> master `GainNode` -> `destination`. Висота має
-  невеликий випадковий розкид (`playbackRate`), ракета звучить нижче, вибух судна - нижче за вибух астероїда.
-- `hit` зі знищенням мовчить (для нього є `explosion`), звуки не накопичуються, поки контекст
-  призупинений, ліміт - 16 одночасних голосів.
-- **Розблокування**: політика автозапуску браузерів дозволяє `resume()` лише після жесту користувача. Його
-  викликає обробник кліку **Join** (синхронно, поки діє жест) і, як запасний варіант, перший `pointerdown`/
-  `keydown`/`touchstart`. Паралельні виклики `unlock()` ділять один `Promise`, тож розблокування логується
-  один раз. Усередині замикань `this` не використовується, тому `audio.unlock` безпечно передається як колбек.
-
-## HTTP-лобі
-
-`Lobby extends EventTarget` (`src/lobby/lobby.js`) - шар даних; `lobby_ui.js` - DOM.
-
-| Подія          | `detail`                       | Коли                                                                                                 |
-| -------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `roomsUpdated` | `{ rooms, source, updatedAt }` | список оновлено (`source`: `network` або `embedded`)                                                 |
-| `error`        | `{ error, kind }`              | `timeout`, `http`, `network`, `parse`, `invalid`, а також `nickname`, `not-found`, `full` при `join` |
-| `joined`       | `{ room, nickname }`           | гравець приєднався                                                                                   |
-| `closed`       | `{ reason, aborted }`          | лобі закрито, `aborted` - скільки запитів скасовано                                                  |
-
-- `refresh()`: запит `./api/rooms.json` із `AbortSignal.timeout(3000)` на **кожну** спробу
-  (`withRetry`, 2 спроби) і спільним сигналом лобі. Відповідь, що запізнилась за новішим запитом, відкидається.
-- `startPolling()`: таймер на `setTimeout` із періодом `pollMs` (наступний запит - після завершення
-  попереднього), тож запити не накладаються.
-- `join(roomId, { nickname })`: перевіряє нікнейм (2-16 символів), існування та заповненість кімнати за
-  останнім списком. Статичний хостинг не має ендпоінта `join`, тому перевірка локальна.
-- **Вихід із лобі в гру**: `join` спершу викликає `close()` - `AbortController.abort()` **миттєво** скасовує
-  всі запити, що летять, зупиняє опитування, і лише потім диспатчить `joined`. Після цього `refresh()` нічого
-  не робить: «осиротілих» запитів не лишається (розбір у Failure Gallery, сценарій 3).
-- `lobby_ui.js` будує DOM через `textContent` (без `innerHTML`: нікнейми й назви не можуть впровадити
-  розмітку), підписується на `roomsUpdated`/`error`/`joined`, зберігає нікнейм у `localStorage` (у `try/catch`).
-- Параметри вибраної кімнати (`arena`: кількість астероїдів, частка «мисливців», інтервал бонусів, seed)
-  накладаються на `arena.json` і потрапляють у `World`. `mergeRules` обмежує значення безпечними діапазонами,
-  тож дані з мережі не можуть зламати світ.
-
-## Порівняння часу: паралельно проти послідовно
-
-Один і той самий `loadAll` (7 запитів: конфіг арени, 2 спрайт-листи, 4 звуки) у двох режимах:
-`Promise.all` / `Promise.allSettled` (за замовчуванням) і `for ... await` (`sequential: true`).
-Chrome (headless, macOS), локальний сервер із фіксованою затримкою на кожен запит до `/assets/`; 5 прогонів на
-клітинку, медіана (мін-макс). Кожен прогін використовує унікальні URL (`?r=...`).
-
-| Затримка на запит | Паралельно (`Promise.all`) | Послідовно (`for ... await`) | Прискорення |
-| ----------------- | -------------------------- | ---------------------------- | ----------- |
-| 0 мс              | 4 мс (4-6)                 | 7 мс (7-8)                   | ×1.8        |
-| 50 мс             | 114 мс (105-119)           | 390 мс (375-395)             | ×3.4        |
-| 150 мс            | 315 мс (315-318)           | 1099 мс (1096-1103)          | ×3.5        |
-| 400 мс            | 812 мс (811-822)           | 2845 мс (2842-2850)          | ×3.5        |
-
-Висновки:
-
-- Послідовно час ≈ `N · L` (7 запитів × 150 мс = 1050 мс, виміряно 1099 мс). Паралельно ≈ `⌈N / 6⌉ · L`: HTTP/1.1 у
-  браузері тримає не більше 6 з'єднань на хост, тож сьомий запит чекає на вільне з'єднання - це дві «хвилі» (2 · 150 = 300 мс, виміряно 315 мс).
-  Для ≤ 6 ассетів або HTTP/2 прискорення було б близьке до ×7.
-- На нульовій затримці (локально, без мережі) різниця в мілісекундах і не показова: перевага паралельності
-  проявляється рівно там, де є очікування мережі.
-- **Пастка вимірювання.** У першому прогоні без унікальних URL «послідовно» вийшло 782 мс замість ~1050: зображення з 2-го
-  прогону віддавалися з кешу документа в пам'яті (заголовок `Cache-Control: no-store` його не вимикає), тож два
-  із семи запитів зникли. Порівняння часу завантаження має перевіряти, що запити справді виконуються.
-
-## Головоломки на порядок виконання
-
-Кожну головоломку запущено у Node 22 і в Chrome - вивід збігається. Перед відповіддю спробуйте вгадати.
-
-**1. `await` проти `.then`**
-
-```js
-console.log('A');
-(async () => {
-  console.log('B');
-  await null;
-  console.log('C');
-})();
-Promise.resolve().then(() => console.log('D'));
-console.log('E');
-```
-
-Вивід: `A`, `B`, `E`, `C`, `D`. Пояснення: async-функція виконується синхронно до першого `await`, а продовження після `await null`
-стає мікрозавданням раніше за `.then`, доданий пізніше.
-
-**2. `setTimeout` усередині `.then`**
-
-```js
-setTimeout(() => console.log('timeout 1'), 0);
-Promise.resolve().then(() => {
-  console.log('then 1');
-  setTimeout(() => console.log('timeout 2 (з then)'), 0);
-  Promise.resolve().then(() => console.log('then 2 (вкладений)'));
-});
-setTimeout(() => console.log('timeout 3'), 0);
-console.log('sync');
-```
-
-Вивід: `sync`, `then 1`, `then 2 (вкладений)`, `timeout 1`, `timeout 3`, `timeout 2 (з then)`. Пояснення: черга мікрозавдань
-(разом із вкладеними) спорожнюється повністю до наступного макрозавдання, а таймер, створений у `.then`, стає в чергу після вже наявних.
-
-**3. `await` і `return Promise` в async-функції**
-
-```js
-async function g() {
-  console.log('g');
-  return Promise.resolve();
-}
-async function f() {
-  console.log('f1');
-  await g();
-  console.log('f2');
-}
-f();
-Promise.resolve()
-  .then(() => console.log('p1'))
-  .then(() => console.log('p2'))
-  .then(() => console.log('p3'))
-  .then(() => console.log('p4'));
-console.log('sync');
-```
-
-Вивід: `f1`, `g`, `sync`, `p1`, `p2`, `f2`, `p3`, `p4`. Пояснення: `return Promise.resolve()` усередині async-функції
-додає два зайві мікрозавдання розгортання thenable, тож `await g()` повертається лише на третьому тику, після `p2`
-(якщо прибрати `return Promise.resolve()`, вивід стане `f1`, `g`, `sync`, `f2`, `p1`, `p2`).
-
-**4. `requestAnimationFrame` і мікрозавдання** (лише браузер)
-
-```js
-requestAnimationFrame(() => {
-  console.log('rAF 1');
-  Promise.resolve().then(() => console.log('microtask inside rAF 1'));
-  requestAnimationFrame(() => console.log('rAF 2 (next frame)'));
-});
-requestAnimationFrame(() => console.log('rAF 1b'));
-Promise.resolve().then(() => console.log('microtask'));
-console.log('sync');
-```
-
-Вивід: `sync`, `microtask`, `rAF 1`, `microtask inside rAF 1`, `rAF 1b`, `rAF 2 (next frame)`. Пояснення: колбеки rAF виконуються
-на кроці рендерингу кадру, після кожного колбека браузер спорожнює мікрозавдання, а rAF, запитаний усередині колбека, спрацьовує лише в наступному кадрі.
-
-**5. `await sleep(0)` проти `setTimeout(0)`**
-
-```js
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-(async () => {
-  console.log('1');
-  await sleep(0);
-  console.log('2');
-})();
-setTimeout(() => console.log('3'), 0);
-Promise.resolve().then(() => console.log('4'));
-queueMicrotask(() => console.log('5'));
-console.log('6');
-```
-
-Вивід: `1`, `6`, `4`, `5`, `2`, `3`. Пояснення: після таймера `sleep` його продовження - це мікрозавдання, і воно виконується одразу після того
-макрозавдання, раніше за наступний таймер `setTimeout(..., 0)`.
-
-## Failure Gallery: як система обробляє збої
-
-Сценарії виконано в Chrome проти локального сервера, що навмисно ламає окремі відповіді; логи - це реальний
-вивід консолі (`+N мс` від початку завантаження сторінки, скорочено). Усі помилки типізовані, екран помилки з
-**Retry** з'являється лише для критичних збоїв.
-
-### 1. 404 на спрайт-листі (`sprites.svg`)
+Сервер використовує лише вбудовані модулі з префіксом `node:` (`http`, `fs`, `fs/promises`, `events`,
+`stream`, `stream/promises`, `path`, `url`, `crypto`) та `ws`. Спільного коду між пакетами немає: клієнт і
+сервер домовляються лише через протокол нижче.
 
 ```
-+ 29ms [info]    [loader] ✓ arena
-+ 29ms [info]    [loader] ✓ hit
-+ 29ms [error]   [loader] ✗ sprites: HttpError: HTTP 404 Not Found: ./assets/sprites.svg
-+ 29ms [info]    [loader] ⊘ asteroids: скасовано
-+ 30ms [error]   [boot] завантаження не вдалося: HttpError: HTTP 404 Not Found: ./assets/sprites.svg
-+ 30ms [info]    [loader] ⊘ pickup: скасовано
+Браузер ──HTTP──> http.js ──> RoomManager ──події──> matchlog.js (Transform -> файл .ndjson)
+   │                              ▲   │
+   └──WebSocket──> ws.js ─────────┘   └──події "join/leave/chat"──> ws.js: roster і chat розсилаються клієнтам
 ```
 
-- `Image` повідомляє лише про `error`; діагностичний `HEAD` дає статус 404 -> `HttpError`. Сервер бачить рівно 2 запити
-  (`GET`, `HEAD`): **4xx не повторюється**.
-- Критичний ассет упав -> `Promise.all` відхиляється, внутрішній `AbortController` скасовує решту запитів (`⊘`).
-- Користувач бачить «Не вдалося завантажити гру / Сервер повернув HTTP 404 / ./assets/sprites.svg» і кнопку **Retry**.
-- Після відновлення файла Retry запускає завантаження наново (`[boot] Retry: повторюю завантаження`), усі 7 ассетів
-  завантажуються (`✓`), відкривається лобі.
+Мережевий шар не змінює стан кімнат напряму поза їх методами, а лише реагує на події `EventEmitter`:
+`Room` емітить `join`, `leave`, `chat`, `empty` та універсальне `event` (для журналу); `RoomManager` видаляє
+кімнату за подією `empty` (або за TTL, якщо в неї ніхто не зайшов) і емітить `created`/`removed`.
 
-### 2. Мережевий таймаут
+## Конфігурація (`.env.example`)
 
-Завантаження (`?requestTimeout=500`: `arena.json` не відповідає):
+| Змінна                 | За замовчуванням   | Призначення                                                          |
+| ---------------------- | ------------------ | -------------------------------------------------------------------- |
+| `PORT` / `HOST`        | `3000` / `0.0.0.0` | адреса сервера (`PORT=0` - вільний порт)                             |
+| `NODE_ENV`             | `production`       | `development`: сервер не віддає статику (її віддає Vite)             |
+| `LOG_DIR`              | `./logs`           | де лежать журнали матчів `<roomId>-<мітка>.ndjson`                   |
+| `STATIC_DIR`           | `client/dist`      | зібраний клієнт                                                      |
+| `MAX_ROOMS`            | `20`               | ліміт кімнат на сервері                                              |
+| `MAX_PLAYERS_PER_ROOM` | `8`                | верхня межа гравців у кімнаті                                        |
+| `MAX_CONNECTIONS`      | `200`              | ліміт WebSocket-з'єднань (понад - код 1013)                          |
+| `MAX_BODY_BYTES`       | `4096`             | ліміт тіла POST                                                      |
+| `WS_MAX_PAYLOAD`       | `16384`            | максимальний розмір кадру WebSocket                                  |
+| `AUTH_TIMEOUT_MS`      | `5000`             | час на валідний `join` після підключення                             |
+| `HEARTBEAT_MS`         | `15000`            | період ping; 2 пропущені pong - відключення                          |
+| `MAX_BUFFERED_BYTES`   | `1048576`          | поріг `bufferedAmount` для політики повільного клієнта               |
+| `RATE_LIMIT_PER_SEC`   | `20`               | повідомлень/с на з'єднання (token bucket); `RATE_LIMIT_BURST` = `40` |
+| `EMPTY_ROOM_TTL_MS`    | `60000`            | видалити кімнату, у яку ніхто не зайшов                              |
+| `SHUTDOWN_TIMEOUT_MS`  | `5000`             | ліміт часу на коректне завершення                                    |
+
+`loadConfig()` перевіряє типи й діапазони, збирає **всі** помилки в один `ConfigError` (процес завершується з кодом 2 і
+списком проблем) і повертає заморожений об'єкт.
+
+## HTTP API
+
+| Метод і шлях               | Відповідь                                                                                                                                               |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /health`              | `200` `{ status, uptimeSec, rooms, connections, memory: { rss, heapUsed }, node, env }`                                                                 |
+| `GET /api/rooms`           | `200` `{ rooms: [{ id, name, map, mode, players, maxPlayers, arena, replayId }] }`                                                                      |
+| `POST /api/rooms`          | `201` + `Location` і кімната; `400` (валідація, з `details`); `409` (ліміт кімнат); `413` (тіло більше `MAX_BODY_BYTES`); `415` (не `application/json`) |
+| `GET /api/replays/:id`     | `200` потік NDJSON через `pipeline(createReadStream(...), res)`; `400` (некоректний id); `404`                                                          |
+| `GET /ws`                  | `426`: цей шлях приймає лише WebSocket-upgrade                                                                                                          |
+| `GET/HEAD /*` (production) | статика з `client/dist` із коректним `Content-Type`; `403` (спроба path traversal); `404`; `405`                                                        |
+
+- **Тіло запиту** читається потоково з жорстким лімітом: надлишок відхиляється одразу (`413`) і з'єднання закривається, дані
+  не накопичуються в пам'яті. Перевіряються і `Content-Length`, і фактичний розмір (chunked-запити без довжини).
+- **Створення кімнати** приймає `{ name, map?, mode?, maxPlayers?, arena? }`; зайві поля й значення поза діапазонами відхиляються.
+- **Захист від path traversal** у три шари (`resolveStaticPath`): (1) шлях беремо **сирим** із `req.url` (WHATWG `URL` мовчки схлопує
+  `/../` і `%2e%2e`, тож атаку не було б видно) і відхиляємо `..` у будь-якому закодованому вигляді та `\0` (`403`/`400`); (2) `path.resolve`
+  мусить лишатися всередині `client/dist`; (3) `realpath` після розкриття симлінків теж мусить лишатися всередині. Тест перевіряє
+  12 варіантів атак і символічне посилання назовні.
+
+## Протокол WebSocket (версія 1)
+
+Усі повідомлення - JSON-об'єкти `{ "v": 1, "type": "...", ...поля }`. Кожне вхідне повідомлення **строго перевіряється**:
+розмір, JSON, версія, відомий `type`, типи й довжини полів, відсутність зайвих полів.
+
+| Клієнт -> сервер | Поля               | Правила                                                                    |
+| ---------------- | ------------------ | -------------------------------------------------------------------------- |
+| `join`           | `room`, `nickname` | `room`: `a-z0-9_-`, 2-40 символів; `nickname`: 2-16, без керівних символів |
+| `chat`           | `text`             | 1-200 символів, без керівних; лише після `join`                            |
+| `leave`          | -                  | вихід із кімнати, сервер закриває з'єднання кодом 1000                     |
+| `ping`           | `t?`               | необов'язкове число; у відповідь `pong`                                    |
+
+| Сервер -> клієнт | Поля                                         | Коли                                                                          |
+| ---------------- | -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `welcome`        | `playerId`, `room`, `players`                | `join` прийнято                                                               |
+| `roster`         | `room`, `players: [{ id, nickname }]`        | хтось увійшов або вийшов                                                      |
+| `chat`           | `room`, `playerId`, `nickname`, `text`, `ts` | повідомлення в кімнаті (усім, зокрема автору)                                 |
+| `pong`           | `t`, `serverTime`                            | відповідь на `ping`                                                           |
+| `error`          | `code`, `message`                            | помилка без закриття (`nickname_taken`, `already_joined`) або перед закриттям |
+
+### Коди закриття
+
+| Код    | Причина                                                                     | Клієнт перепідключається? |
+| ------ | --------------------------------------------------------------------------- | ------------------------- |
+| `1000` | нормальне закриття (`leave`)                                                | ні                        |
+| `1001` | сервер зупиняється (graceful shutdown)                                      | так                       |
+| `1003` | бінарний кадр                                                               | ні                        |
+| `1007` | не JSON, хибна схема чи версія                                              | ні                        |
+| `1008` | невідомий `type`, `chat` до `join`, перевищено rate limit                   | ні                        |
+| `1009` | кадр більший за `WS_MAX_PAYLOAD`                                            | ні                        |
+| `1013` | сервер переповнений (`MAX_CONNECTIONS`)                                     | так                       |
+| `4001` | таймаут авторизації: немає валідного `join` за 5 с                          | ні                        |
+| `4002` | heartbeat: клієнт не відповідає (реально - `terminate`, клієнт бачить 1006) | так                       |
+| `4003` | кімнату не знайдено                                                         | ні                        |
+| `4004` | кімната заповнена                                                           | ні                        |
+| `4005` | повільний клієнт                                                            | ні                        |
+
+Кожне порушення логується (`порушення протоколу WebSocket` із кодом, причиною та IP), клієнт отримує `error`, і сокет закривається
+відповідним кодом.
+
+### Захист від зловживань (`ws.js`)
+
+- **`maxPayload`** (16 КіБ): бібліотека сама закриває з'єднання кодом 1009; на тому ж сокеті є обов'язковий **`socket.on('error')`**.
+- **Таймаут авторизації**: таймер на 5 с після підключення, скасовується успішним `join`.
+- **Heartbeat**: `ping` кожні 15 с; клієнт, що не відповів на 2 пінги поспіль, відключається (`terminate`).
+- **Rate limit**: `TokenBucket` на кожне з'єднання (20 повідомлень/с, сплеск 40). Перевищення - код 1008.
+- **Ліміти**: кімнат (`MAX_ROOMS`), гравців у кімнаті, з'єднань. Зайнятий нікнейм у кімнаті - помилка без закриття.
+- **Повільний клієнт** (`safeSend`): перед кожною відправкою перевіряється `socket.bufferedAmount`. Вище порога - повідомлення
+  **відкидається** (не накопичується в пам'яті сервера); після 100 відкинутих підряд - закриття кодом 4005; вище 4× порога - миттєвий `terminate`.
+
+## Потокове логування NDJSON
 
 ```
-+  520ms [warning] [retry] спроба 1/3 невдала (TimeoutError: signal timed out); повтор через 138 мс
-+ 1159ms [warning] [retry] спроба 2/3 невдала (TimeoutError: signal timed out); повтор через 252 мс
-+ 1914ms [error]   [loader] ✗ arena: TimeoutError: signal timed out
-+ 1914ms [error]   [boot] завантаження не вдалося: TimeoutError: signal timed out
+room.emit('event', { type, ... })  ──>  Transform (objectMode)  ──pipeline──>  fs.createWriteStream
+                                         {t, type, ...} -> "JSON\n"            LOG_DIR/<roomId>-<мітка>.ndjson
 ```
 
-Запити до сервера: `+13`, `+654`, `+1408 мс` - три спроби з паузами 138 і 252 мс (backoff із джитером: у діапазонах 100-200 і
-200-400 мс). Інші шість ассетів на той момент уже завантажені. На екрані: «Час очікування вичерпано / Сервер не відповів вчасно» і **Retry**.
-
-Лобі (`rooms.json` не відповідає, таймаут 3 с на спробу, 2 спроби):
+- `createMatchLog()` створює `NdjsonTransform` (`writableObjectMode: true`) і з'єднує його з файлом через `pipeline` із
+  `node:stream/promises`. Запис `{ t, ...подія }` отримує `t` - мс від початку матчу. Приклад журналу (реальний):
 
 ```
-+ 3369ms [warning] [retry] спроба 1/2 невдала (TimeoutError: signal timed out); повтор через 243 мс
-+ 6617ms [warning] [lobby] помилка оновлення списку кімнат (timeout): signal timed out
+{"t":0,"type":"start","room":{"id":"alpha-squad-0184","name":"Alpha Squad","map":"Open Space","mode":"Sandbox","maxPlayers":8,"arena":{}}}
+{"t":154,"type":"join","playerId":"71484a13","nickname":"Maverick"}
+{"t":350,"type":"chat","playerId":"69fdecd4","nickname":"Goose","text":"Привіт від Goose!","ts":1794790647356}
+{"t":971,"type":"leave","playerId":"71484a13","nickname":"Maverick"}
+{"t":971,"type":"end"}
 ```
 
-Лобі лишається живим: у червоному блоці з'являється «Сервер не відповів за 3 с», кнопка **Оновити** працює, опитування триває.
+- **Backpressure**: `write()` повертає `false`, коли внутрішня черга `Transform` повна (диск не встигає); `drained()` чекає події `drain`.
+  Помилка запису не стає `unhandled rejection`: вона лишається в `end()` і викликає `onError`.
+- **Життєвий цикл**: журнал створюється за подією `created` кімнати й закривається (`{type:"end"}`, потім `end()` і очікування `pipeline`) за
+  `removed` або під час graceful shutdown.
+- **`readReplay(file)`** - `async function*` поверх `createReadStream` з кодуванням `utf8` (декодер не розрізає багатобайтові символи на межі
+  чанків): розбиває потік на рядки, парсить JSON, піднімає `ReplayParseError` із номером рядка (або пропускає зламані за `skipInvalid`).
+  Ранній `break` у `for await` закриває потік.
+- `GET /api/replays/:id` віддає файл через `pipeline(createReadStream(file, { end: size - 1 }), res)`: файл ніколи не потрапляє в
+  пам'ять цілком, а активний (ще пишеться) журнал віддається рівно за обіцяним `Content-Length`.
 
-### 3. Скасування запиту (`AbortError`) при виході з лобі
+## Клієнт: мережа й лобі
 
-Опитування (`?lobbyPoll=300`), сервер затримує відповідь на 2.5 с, у цей час гравець натискає **Join**:
+- **`Connection`** (`net/connection.js`) обгортає браузерний `WebSocket`: (1) **черга** відправки - повідомлення до відкриття або під час
+  перепідключення чекають і відправляються по порядку, причому спершу подія `connected` (застосунок надсилає `join`), і лише потім скидається черга, щоб чат
+  не випередив `join`; (2) **диспетчеризація** за `type`: кожен тип стає подією (`welcome`, `roster`, `chat`, `pong`, `error`), шкідливий
+  JSON дає `protocolerror`, а не виняток; (3) **reconnect** з експоненційним backoff і джитером (500 мс -> 15 с) для кодів 1001, 1006, 1013 і не для
+  свідомих відмов сервера (таблиця кодів).
+- **`Lobby`** (`lobby/lobby.js`) має три режими джерела: `server` (`GET/POST ./api/rooms`, WebSocket `./ws`), `static` (сервера немає, є
+  `./api/rooms.json`) і `embedded` (`file://`). Після (пере)підключення `join` надсилається заново. Вихід у гру закриває WebSocket і скасовує
+  всі запити (`AbortController`) **до** події `joined`.
+- **`lobby_ui.js`**: створення кімнати (форма), вибір кімнати, нікнейм; після входу - живий **roster**, **чат**, статус з'єднання
+  («Перепідключення (спроба 3, через 1843 мс)…»), кнопки **Покинути** й **Почати матч** (локальний матч за параметрами кімнати). Без
+  сервера Join одразу запускає локальний матч, форма створення прихована. DOM будується через `textContent`.
+
+## Node.js Event Loop і Backpressure
+
+**Фази libuv і блокування.** Цикл libuv проходить: _timers_ -> _pending_ -> _idle/prepare_ -> **poll** (I/O: усі WebSocket-
+повідомлення й HTTP-запити) -> _check_ (`setImmediate`) -> _close_; після кожного колбека виконуються `process.nextTick` і мікрозавдання. JavaScript
+працює в **одному потоці**, тож обробник, який синхронно рахує 300 мс, не дає циклу дійти до poll: нові повідомлення, таймери
+(heartbeat, auth-таймаут) і відповіді **всім** клієнтам чекають. Вимірювання: 3 WebSocket-клієнти шлють `ping` кожні 20 мс, серверний процес
+кожні 2 с блокує цикл на 300 мс (12 с на сценарій):
+
+| Сценарій                    | Замірів | p50    | p95      | p99      | max      | Відповідей >100 мс |
+| --------------------------- | ------- | ------ | -------- | -------- | -------- | ------------------ |
+| без блокування              | 1665    | 0.8 мс | 1.5 мс   | 1.9 мс   | 2.7 мс   | 0 (0.0%)           |
+| блокування 300 мс кожні 2 с | 1662    | 0.7 мс | 183.0 мс | 277.8 мс | 300.4 мс | 141 (8.5%)         |
+
+Максимум **у кожного з трьох клієнтів** - 300.1, 300.2 і 300.4 мс: затримка спільна, бо це один потік. Зцілюється не «швидшим сервером», а
+винесенням важкої роботи з циклу: `worker_threads`, `setImmediate`-нарізка, асинхронні API (fs/crypto працюють у пулі libuv).
+
+**Backpressure у `Transform` + `pipeline`.** `pipeline` з'єднує потоки так, що повільний споживач зупиняє виробника: `res.write()`
+повертає `false`, коли буфер сокета заповнений (16 КіБ), читання файлу ставиться на паузу, і пам'яті треба рівно на чанки
+в польоті (`createReadStream` - 64 КіБ) плюс буфери сокета. Для запису черга `Transform` обмежена (16 об'єктів + 16 КіБ), після чого `write()` дає `false`.
+Вимірювання: журнал 200 МБ віддається клієнту, що читає ~3 МБ/с (по чанку раз на 20 мс), 12 с:
+
+| Реалізація                        | RSS до | RSS пік | Приріст | RSS після | Клієнт отримав за 12 с |
+| --------------------------------- | ------ | ------- | ------- | --------- | ---------------------- |
+| `pipeline(createReadStream, res)` | 73 МБ  | 88 МБ   | 15 МБ   | 88 МБ     | 34 МБ                  |
+| `readFile` + `res.end(buffer)`    | 55 МБ  | 258 МБ  | 202 МБ  | 255 МБ    | 34 МБ                  |
+
+RSS `pipeline`: 73, 78, 81, 83, 84, 84, 85, 88, 87, 87, 88, 88 МБ (плато після розігріву), `readFile`: 55 -> 258 МБ **миттєво** і далі пласко. Клієнт
+отримав однакові 34 МБ, але наївний сервер завантажив у пам'ять усі 200 МБ ще до першого байта. Тому «плоский RSS» не залежить від розміру файлу
+й швидкості клієнта.
+
+**Чому `error` без обробника і `unhandledRejection` валять процес.** `'error'` - єдина подія `EventEmitter`, яка без слухача **кидає
+виняток**; необроблений виняток завершує процес. З Node 15 `unhandledRejection` за замовчуванням теж перетворюється на виняток. Реальні логи (Node 22):
 
 ```
-запитів у польоті перед Join: 1
-net::ERR_ABORTED canceled=true  (+34 мс після кліку)
-+ 1178ms [info] [lobby] лобі закрито (joined); скасовано запитів у польоті: 1
-+ 1179ms [info] [game] матч розпочато: «Пояс астероїдів», пілот Maverick
-активних запитів у лобі після Join: 0
-нових запитів до rooms.json за 3.5 с після Join: 0
-помилок сторінки: немає; console.error: 0
+$ room.emit('error', new Error('збій запису журналу'))      # exit code 1
+Error: збій запису журналу
+Emitted 'error' event at: ...
+Node.js v22.23.5
+
+$ async function saveLog() { throw new Error('диск повний') }; saveLog()   # забули await, exit code 1
+Error: диск повний
+    at saveLog ([eval]:2:34)
+
+$ ws: кадр більший за maxPayload, на сокеті немає socket.on('error')   # exit code 1
+node:events:497
+      throw er; // Unhandled 'error' event
+RangeError: Max payload size exceeded
+    at Receiver.haveLength (node_modules/ws/lib/receiver.js:442:28)
+Emitted 'error' event on WebSocket instance at: ...   { code: 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH', [Symbol(status-code)]: 1009 }
 ```
 
-- `join` викликає `close()` -> `AbortController.abort()`: у DevTools запит завершується як `net::ERR_ABORTED`, `canceled = true`.
-- `AbortError` у цьому випадку **не** перетворюється на подію `error` і не показується користувачеві: `refresh()` бачить, що
-  скасування зробило саме лобі, і тихо повертає `null`. Пауза між повторами (`sleep`) теж переривається сигналом.
-- Опитування зупинено, нових запитів немає: «осиротілих» запитів після зміни екрана не лишається.
-
-### 4. Битий JSON
-
-Завантаження (`arena.json` повертає `{ "rules": { broken` зі статусом 200):
+Один клієнт із надто великим кадром зупинив би **сервер для всіх**. Захист у три шари: (1) слухач `'error'` на кожному джерелі (`socket.on('error')` у
+`ws.js`, `finished.catch` у `matchlog.js`, `server.on('clientError')`); (2) кожен async-обробник загорнуто в `try/catch`/`.catch`, помилка обробки повідомлення закриває лише
+його сокет (1011); (3) останній рубіж у `main()` - `process.on('unhandledRejection'/'uncaughtException')`: **лог, graceful shutdown (журнали на диск) і `exit(1)`**.
+Мовчки «проковтнути» не можна: стан процесу невідомий, менеджер процесів перезапустить його. Реальний вивід нашого сервера при `unhandledRejection` (код виходу 1):
 
 ```
-+ 21ms [error] [loader] ✗ arena: JsonParseError: Пошкоджений JSON: ./assets/arena.json
-+ 22ms [info]  [loader] ⊘ sprites: скасовано
-+ 22ms [error] [boot] завантаження не вдалося: JsonParseError: Пошкоджений JSON: ./assets/arena.json
+ERROR фатальна помилка: unhandledRejection {"error":{"name":"Error","message":"імітація: забули await","stack":"Error: ..."}}
 ```
 
-- Статус 200, але `response.json()` кидає `SyntaxError` -> `JsonParseError`. Сервер бачить **один** запит: пошкоджені дані не
-  повторюються (повтор отримав би ті самі байти). Екран: «Файл пошкоджено (некоректний JSON) / ./assets/arena.json» і **Retry**.
-- Окремо `validateArenaConfig` відхиляє синтаксично коректний, але хибний конфіг (`ConfigError`).
+## Graceful shutdown
 
-Лобі (`rooms.json` пошкоджено): у списку кімнат з'являється «Відповідь сервера пошкоджена (некоректний JSON). Пошкоджений JSON:
-./api/rooms.json»; після відновлення сервера кнопка **Оновити** повертає 4 кімнати, а повідомлення зникає.
+За `SIGINT`/`SIGTERM` `app.shutdown()`: (1) `server.close()` - нові з'єднання не приймаються; (2) усім WebSocket-клієнтам іде код **1001**, після чого
+сервер чекає закриття (потім `terminate`); (3) дописуються й закриваються всі журнали (`{type:"end"}`, очікування `pipeline`); (4) чекаємо закриття HTTP-з'єднань (за
+`SHUTDOWN_TIMEOUT_MS` - примусово) і процес виходить із кодом **0**. Повторний сигнал - негайний вихід.
 
-### Додаткові сценарії
+## Тести
 
-- **Нестабільний сервер** (`sprites.svg`: 500, 500, потім 200): `[retry] спроба 1/3 невдала (HttpError: HTTP 500 ...); повтор через 184 мс`, далі
-  `✓ sprites`; лобі відкривається без втручання користувача (3 запити до сервера: `GET`, діагностичний `HEAD`, повторний `GET`).
-- **Відсутній некритичний ассет** (`hit.wav` -> 404): `[loader] ✗ hit: HttpError: HTTP 404 ...`, `[boot] гра запускається без звуків: hit`.
-  Лобі відкривається, гра йде без цього звуку.
+- **Сервер, `node --test`: 117 тестів** (`server/test/`): `protocol` (схеми, 20 відхилень із кодами закриття), `rooms` (події `join/leave/chat/empty/event`, ліміти, автовидалення за
+  `empty` і за TTL на `mock.timers`), `config`, `TokenBucket`, `matchlog`/`replay` (круговий шлях, **backpressure** із повільним диском, помилка запису, межі чанків, багатобайтові
+  символи), `http` (REST, 413 для chunked, стрімінг журналу, 12 атак path traversal, симлінк, MIME), `ws` (roster і чат, ізоляція кімнат, усі коди закриття, rate limit,
+  heartbeat, обробник `error`, `safeSend`, graceful shutdown із перевіркою журналу).
+- **Клієнт, `node --test`: 31 тест**: `Connection` (черга, порядок `connected` -> черга, backoff, коди без реконнекту, **інтеграція з реальним сервером**), `Lobby` (fallback, POST, сесія).
+- **Chrome (DevTools Protocol) проти реального сервера** (скрипти поза проєктом): створення кімнати через UI, вхід, живий roster і чат у **обидва** боки із зовнішнім клієнтом, запуск
+  матчу, replay через REST; перепідключення після зупинки сервера (UI показує «Перепідключення (спроба 3, через 1843 мс)…», після рестарту - «Кімнату не знайдено» із кодом 4003);
+  режим статичного хостингу; `file://`; `npm run dev` із проксі `/api` і `/ws`.
 
-### Що виявила сама галерея
+## Структура знімка `Lab_N`
 
-Три помилки, яких не помітили юніт-тести, виправлено за результатами цих запусків:
+У `JavaScript_Labs/Lab_4` лежить уся структура монорепозиторію: `package.json`, `package-lock.json`, `client/` (із зібраним `client/dist/`), `server/`, `scripts/`, `.env.example`, конфіги, `.nvmrc`
+і `README.md`. Без `node_modules/`, `.DS_Store` і журналів. Щоб запустити: `npm install && npm start` (клієнт уже зібрано в `client/dist`). `client/dist/index.html`
+відкривається подвійним кліком без сервера.
 
-1. Після падіння критичного ассету скасовані звуки логувалися з текстом чужої помилки (причину скасування
-   передавали як `reason`). Тепер це окрема причина, а в логах - `⊘ ... скасовано`.
-2. `HEAD`-діагностика, що повернула 200 після 500 на `GET`, вважала збій «битим файлом» і не повторювала його. Тепер це
-   повторюваний `ImageLoadError`.
-3. Допоміжний стенд забруднював лічильники запитів між сценаріями, а `__dogfight` існує лише після старту матчу (стосується тесту, не гри).
+## Якість коду
 
-## Перевірка
-
-- `npm run lint` - без помилок і попереджень; `npm run format:check` - без зауважень.
-- Окремий скрипт у Node (29 перевірок, у проєкт не входить): `fetchJson` на 200/404/500/битому JSON/обриві/таймауті; `isRetryable`;
-  `withRetry` (404 і битий JSON - 1 запит, 500 - рівно `attempts` запитів, backoff у межах джитера, скасування під час паузи);
-  `loadAll` (некритичний звук не ламає запуск, критичний - ламає); `Lobby` (оновлення, помилки, `close()` скасовує запит у
-  польоті, застарілі відповіді, вбудований режим); події шини; **розділення шарів**; `audio.js` на тестовому `AudioContext`;
-  збіг `manifest.json` із вбудованим маніфестом; синтез звуків без `NaN`. Регресія Лаби №2 (17 перевірок) проходить.
-- Chrome через DevTools Protocol: потік Loading -> Lobby -> Game по `file://` (0 мережевих запитів, 4 звуки з синтезу, події
-  шини запускають звук), 8 сценаріїв Failure Gallery, вимірювання часу, головоломки.
-- Усі файли - UTF-8 без BOM, переведення рядків LF.
+- `npm run lint` - без помилок і попереджень; `npm run format:check` - без зауважень; `npm test` - 148 тестів.
+- Усі файли - UTF-8 без BOM, переведення рядків LF; коментарі й README - українською.
 
 ---
 
@@ -485,26 +300,29 @@ net::ERR_ABORTED canceled=true  (+34 мс після кліку)
 
 _Усі заміри виконано в Node.js `v26.13.1` на цільовій машині._
 
-### 1. `Promise.all` проти `Promise.allSettled` за помилки одного ресурсу
+### 1. Backpressure у потоці `Writable` (`highWaterMark: 256`)
 
-Для трьох промісів (`A` — 10 мс, `B` — помилка через 15 мс, `C` — 20 мс):
+Під час запису 16 чанків по 128 байтів у повільний `Writable` (`write` завершується через 2 мс):
 
 ```text
-Promise.all        -> reject: "fail:B" (переривається на першій помилці)
-Promise.allSettled -> [ 'fulfilled:A', 'rejected:fail:B', 'fulfilled:C' ]
+BACKPRESSURE: { writes: 16, backpressures: 8, drains: 8, hwm: 256 }
 ```
 
-**Висновок:** `Promise.all` зручний для критичних залежностей (якщо без файлу неможливо продовжити), а `Promise.allSettled` — для опціональних ресурсів (наприклад, звуків), дозволяючи завантажити все доступне й перейти на fallback для елементів, що не завантажилися.
+**Висновок:** щойно внутрішній буфер досягає `highWaterMark` (256 Б), `.write()` повертає `false`, сигналізуючи виробнику зупинитися й дочекатися події `'drain'`. Ігнорування цього сигналу призводить до неконтрольованого зростання RAM під час запису NDJSON-журналів матчів.
 
-### 2. Послідовний `for await` проти паралельного `Promise.all` (5 × 40 мс)
+### 2. Порядкове читання NDJSON (`readline` stream) проти повного `readFileSync`
 
-| Підхід                                  | Час виконання | Прискорення |
-| --------------------------------------- | ------------: | ----------: |
-| Послідовний `for (...) await delay(40)` | **226.27 ms** |       1.00× |
-| Паралельний `Promise.all(...)`          |  **47.96 ms** |   **4.72×** |
+На 25 000 записах NDJSON (події пострілів):
 
-**Висновок:** паралельне завантаження асетів через `Promise.all` скорочує загальний час очікування із суми затримок ($\sum t_i$) до часу найповільнішого запиту ($\max t_i$).
+| Спосіб обробки                                 | Записів |   Приріст `heapUsed` |
+| ---------------------------------------------- | ------: | -------------------: |
+| Повне завантаження + `split().map(JSON.parse)` |  25 000 |        **+4 629 KB** |
+| Потокове читання `readline` (`for await`)      |  25 000 | **+2 596 KB** (−44%) |
 
-### 3. Розблокування Web Audio (`AudioContext.resume()`)
+**Висновок:** потоковий розбір не утримує весь масив розпарсених об'єктів у купі одночасно, що дозволяє відтворювати та віддавати великі `.ndjson`-журнали через `pipeline()` із передбачуваним споживанням пам'яті.
 
-Браузери застосовують Autoplay Policy і створюють `AudioContext` у стані `'suspended'` до першого жесту користувача (`click`, `keydown`, `pointerdown`). Тому в клієнті виклик `audioCtx.resume()` прив'язано до першого вводу гравця — без цього синтезовані звуки пострілів і вибухів залишаються беззвучними навіть після успішного завантаження.
+### 3. Коди закриття WebSocket-протоколу
+
+- **`1007` (`INVALID_PAYLOAD`)** — пошкоджений JSON або порушення схеми повідомлення.
+- **`1008` (`POLICY_VIOLATION`)** — порушення правил протоколу (rate limit, повідомлення `chat`/`ready` до `join`, невідомий тип кадру).
+- **`4001` (`AUTH_TIMEOUT`)** — клієнт відкрив сокет, але не надіслав `join` у межах `AUTH_TIMEOUT_MS`.

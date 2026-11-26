@@ -22,9 +22,18 @@ function fileProtocolCompat() {
   };
 }
 
+// Адреса Node-сервера, на який dev-режим проксує /api і /ws.
+const SERVER_URL = process.env.SERVER_URL ?? 'http://localhost:3000';
+
 export default defineConfig({
   base: './',
   plugins: [fileProtocolCompat()],
+  server: {
+    proxy: {
+      '/api': SERVER_URL,
+      '/ws': { target: SERVER_URL.replace(/^http/, 'ws'), ws: true },
+    },
+  },
   build: {
     modulePreload: false,
     rollupOptions: {

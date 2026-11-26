@@ -44,7 +44,7 @@ export function createLoadingScreen({ ctx, view, canvas }) {
     ctx.fillText('DOGFIGHT', cx, cy - 90);
     ctx.fillStyle = 'rgba(190, 215, 255, 0.6)';
     ctx.font = `14px ${FONT}`;
-    ctx.fillText('Лабораторна робота №3 · завантаження ресурсів', cx, cy - 56);
+    ctx.fillText('Лабораторна робота №4 · завантаження ресурсів', cx, cy - 56);
 
     const width = Math.min(420, view.width - 48);
     const x = cx - width / 2;

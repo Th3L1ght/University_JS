@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Dogfight - Lab 3</title>
+    <title>Dogfight - Lab 4</title>
     <style>
       html,
       body {
@@ -176,6 +176,94 @@
       .lobby__button--secondary {
         background: rgba(190, 215, 255, 0.16);
         color: #dbe9ff;
+      }
+
+      .lobby__mode {
+        margin: 0 0 14px;
+        text-align: center;
+        color: rgba(143, 233, 255, 0.75);
+        font-size: 12px;
+      }
+
+      .lobby__create {
+        display: flex;
+        gap: 8px;
+        margin: 0 0 12px;
+      }
+
+      .lobby__create[hidden],
+      .lobby__panel[hidden],
+      .lobby__browse[hidden] {
+        display: none;
+      }
+
+      .lobby__create .lobby__input {
+        margin-top: 0;
+      }
+
+      .lobby__room-title {
+        margin: 0 0 4px;
+        font-size: 20px;
+      }
+
+      .lobby__columns {
+        display: grid;
+        grid-template-columns: 1fr 2fr;
+        gap: 14px;
+        margin: 8px 0 14px;
+      }
+
+      .lobby__heading {
+        margin: 0 0 6px;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: rgba(190, 215, 255, 0.65);
+      }
+
+      .lobby__roster,
+      .lobby__chat {
+        margin: 0;
+        padding: 8px;
+        height: 200px;
+        overflow-y: auto;
+        list-style: none;
+        border: 1px solid rgba(190, 215, 255, 0.2);
+        border-radius: 8px;
+        background: rgba(5, 12, 22, 0.7);
+      }
+
+      .lobby__player {
+        padding: 2px 0;
+      }
+
+      .lobby__player--me {
+        color: #8fe9ff;
+        font-weight: 700;
+      }
+
+      .lobby__chat-line {
+        padding: 2px 0;
+        overflow-wrap: anywhere;
+      }
+
+      .lobby__chat-line--system {
+        color: rgba(190, 215, 255, 0.5);
+        font-size: 12px;
+      }
+
+      .lobby__chat-author {
+        color: #8fe9ff;
+      }
+
+      .lobby__chat-form {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+
+      .lobby__chat-form .lobby__input {
+        margin-top: 0;
       }
 
       .lobby__button:disabled {

@@ -1,0 +1,19 @@
+{
+  "name": "dogfight-server",
+  "version": "4.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dogfight server: node:http + ws, rooms, NDJSON match logs",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
