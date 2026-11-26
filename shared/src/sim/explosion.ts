@@ -38,28 +38,57 @@ export interface ExplosionSnapshot extends BaseEntitySnapshot {
 }
 
 export class Explosion extends Entity {
-  readonly tint: ExplosionTint;
+  tint: ExplosionTint;
   particles: ExplosionParticle[];
 
   constructor({ x, y, rng, count = 20, speed = 120, life = 0.8, tint = 'rock' }: ExplosionOptions) {
     super({ kind: Kind.EXPLOSION, x, y, radius: 0, collidable: false });
     this.tint = tint;
-    this.particles = Array.from({ length: count }, () => {
+    this.particles = [];
+    this.reset({ x, y, rng, count, speed, life, tint });
+  }
+
+  /** Повторно використовує масив і об'єкти частинок для ObjectPool без зайвих алокацій. */
+  reset({ x, y, rng, count = 20, speed = 120, life = 0.8, tint = 'rock' }: ExplosionOptions): this {
+    this.teleport(x, y);
+    this.alive = count > 0;
+    this.collidable = false;
+    this.components = {};
+    this.world = null;
+    this.tint = tint;
+
+    this.particles.length = count;
+    for (let i = 0; i < count; i += 1) {
       const direction = rng() * TAU;
       const v = speed * (0.35 + rng() * 0.65);
       const lifetime = life * (0.6 + rng() * 0.4);
-      return {
-        x,
-        y,
-        prevX: x,
-        prevY: y,
-        vx: Math.cos(direction) * v,
-        vy: Math.sin(direction) * v,
-        life: lifetime,
-        maxLife: lifetime,
-        size: 1 + rng() * 2.2,
-      };
-    });
+      const size = 1 + rng() * 2.2;
+      const existing = this.particles[i];
+      if (existing) {
+        existing.x = x;
+        existing.y = y;
+        existing.prevX = x;
+        existing.prevY = y;
+        existing.vx = Math.cos(direction) * v;
+        existing.vy = Math.sin(direction) * v;
+        existing.life = lifetime;
+        existing.maxLife = lifetime;
+        existing.size = size;
+      } else {
+        this.particles[i] = {
+          x,
+          y,
+          prevX: x,
+          prevY: y,
+          vx: Math.cos(direction) * v,
+          vy: Math.sin(direction) * v,
+          life: lifetime,
+          maxLife: lifetime,
+          size,
+        };
+      }
+    }
+    return this;
   }
 
   override update(dt: number): void {

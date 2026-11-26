@@ -18,12 +18,13 @@ import { createAudioContext, createAudioSystem, type AudioSystem } from './audio
 import { createInput } from './input.ts';
 import { defaultWsUrl, Lobby, type JoinedDetail } from './lobby/lobby.ts';
 import { createLobbyUi } from './lobby/lobby_ui.ts';
-import { createLoop } from './loop.ts';
+import { createLoop, type LoopMetrics } from './loop.ts';
 import { NetClient } from './net/net_client.ts';
 import { createCanvas } from './render/canvas.ts';
 import { drawFrame } from './render/draw.ts';
 import { createLoadingScreen } from './render/loading_screen.ts';
 import { createNetgraph } from './render/netgraph.ts';
+import { createParticleSystem } from './render/particle_bridge.ts';
 import { Bus, type GameEvents } from './util/bus.ts';
 import { log } from './util/log.ts';
 
@@ -140,6 +141,19 @@ function startOnlineMatch(detail: JoinedDetail, assets: LoadedAssets, audio: Aud
     interpolationDelayMs: INITIAL_INTERP_MS,
   });
   audio.attach(net.bus);
+  const particles = createParticleSystem();
+  net.bus.on('exploded', ({ kind, size, x, y }) => {
+    if (typeof x !== 'number' || typeof y !== 'number') return;
+    const isShip = kind === 'ship';
+    particles.spawn({
+      x,
+      y,
+      count: isShip ? 42 : 6 + 5 * size,
+      speed: isShip ? 240 : 40 + 35 * size,
+      life: isShip ? 1.1 : 0.45 + 0.2 * size,
+      tint: isShip ? 'ship' : 'rock',
+    });
+  });
   const netgraph = createNetgraph({ container: uiRoot, net });
 
   const input = createInput(window);
@@ -167,15 +181,15 @@ function startOnlineMatch(detail: JoinedDetail, assets: LoadedAssets, audio: Aud
     input.endStep();
   }
 
-  function render(
-    alpha: number,
-    metrics: { stepsPerSec: number; fps: number; frameTimeMs: number },
-  ): void {
+  function render(alpha: number, metrics: LoopMetrics): void {
     const now = performance.now();
     const dtFrame = Math.min(0.1, Math.max(0, (now - lastRenderAt) / 1000));
     lastRenderAt = now;
+    particles.step(dtFrame);
     const renderWorld = net.buildRenderWorld(alpha, dtFrame, now);
-    drawFrame(ctx, view, renderWorld, alpha, metrics, now, assets.sprites, session);
+    drawFrame(ctx, view, renderWorld, alpha, metrics, now, assets.sprites, session, (c) =>
+      particles.draw(c),
+    );
     netgraph.update(now);
   }
 
@@ -223,10 +237,7 @@ function startLocalMatch(detail: JoinedDetail, assets: LoadedAssets, audio: Audi
     input.endStep();
   }
 
-  function render(
-    alpha: number,
-    metrics: { stepsPerSec: number; fps: number; frameTimeMs: number },
-  ): void {
+  function render(alpha: number, metrics: LoopMetrics): void {
     const now = performance.now();
     drawFrame(ctx, view, world, alpha, metrics, now, assets.sprites, session);
     netgraph.update(now);

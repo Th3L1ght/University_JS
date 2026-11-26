@@ -67,6 +67,13 @@ export interface WorldHost {
   readonly height: number;
   spawn<T extends Entity>(entity: T): T;
   emit(type: string, detail?: Record<string, unknown>): void;
+  acquireBullet?(options: {
+    readonly pos: { readonly x: number; readonly y: number };
+    readonly vel: { readonly x: number; readonly y: number };
+    readonly owner: EntityId;
+    readonly damage: number;
+    readonly ttl: number;
+  }): Entity;
 }
 
 export interface EntityOptions {

@@ -76,7 +76,7 @@ export function createApp(
         logger.error('помилка завершення журналу', { room: roomId, error }),
       );
     finishing.add(done);
-    done.finally(() => finishing.delete(done));
+    void done.finally(() => finishing.delete(done));
   }
 
   let ws: WsServerHandle | null = null;
@@ -85,6 +85,7 @@ export function createApp(
       config,
       rooms,
       logger,
+      addBots: (room, count) => matches.addBots(room, count),
       stats: () => ({ connections: ws?.connections.size ?? 0, ...matches.stats() }),
     }),
   );
@@ -178,7 +179,7 @@ async function main(): Promise<void> {
   const fatal = (kind: string) => (error: unknown) => {
     logger.error(`фатальна помилка: ${kind}`, { error });
     setTimeout(() => process.exit(1), 3000).unref();
-    app.shutdown(kind).finally(() => process.exit(1));
+    void app.shutdown(kind).finally(() => process.exit(1));
   };
   process.on('uncaughtException', fatal('uncaughtException'));
   process.on('unhandledRejection', fatal('unhandledRejection'));

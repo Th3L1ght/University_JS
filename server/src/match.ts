@@ -26,6 +26,7 @@ import {
   type Seq,
   type Tick,
 } from '@dogfight/shared';
+import { BotManager, type BotInfo } from './bot.ts';
 import type { Logger } from './logger.ts';
 import type { Room } from './rooms.ts';
 
@@ -130,6 +131,7 @@ export class Match {
   #room: Room;
   #logger: Logger;
   #now: () => number;
+  #onBeforeTick?: (match: Match) => void;
   #world: World;
   #clients = new Map<string, MatchClient>();
   #events: NetExplosionEvent[] = [];
@@ -161,14 +163,17 @@ export class Match {
     room,
     logger,
     now = () => performance.now(),
+    onBeforeTick,
   }: {
     readonly room: Room;
     readonly logger: Logger;
     readonly now?: () => number;
+    readonly onBeforeTick?: (match: Match) => void;
   }) {
     this.#room = room;
     this.#logger = logger;
     this.#now = now;
+    this.#onBeforeTick = onBeforeTick;
     const arenaSeed = room.arena.seed;
     this.seed =
       typeof arenaSeed === 'number' && Number.isFinite(arenaSeed)
@@ -379,6 +384,7 @@ export class Match {
   };
 
   stepTick(): void {
+    this.#onBeforeTick?.(this);
     for (const client of this.#clients.values()) {
       let command = client.queue.shift();
       while (client.queue.length > MAX_BACKLOG_AFTER_TAKE) {
@@ -455,6 +461,7 @@ export class Match {
 
 export class MatchManager {
   #matches = new Map<string, Match>();
+  #bots = new BotManager();
   #logger: Logger;
   #now?: () => number;
 
@@ -474,13 +481,24 @@ export class MatchManager {
   getOrCreate(room: Room): Match {
     let match = this.#matches.get(room.id);
     if (!match) {
-      match = new Match({ room, logger: this.#logger, now: this.#now });
+      match = new Match({
+        room,
+        logger: this.#logger,
+        now: this.#now,
+        onBeforeTick: (m) => this.#bots.stepBots(m),
+      });
       this.#matches.set(room.id, match);
     }
     return match;
   }
 
+  addBots(room: Room, count: number): BotInfo[] {
+    const match = this.getOrCreate(room);
+    return this.#bots.addBots(match, count);
+  }
+
   remove(roomId: string): boolean {
+    this.#bots.removeRoom(roomId);
     const match = this.#matches.get(roomId);
     if (!match) return false;
     match.stop();

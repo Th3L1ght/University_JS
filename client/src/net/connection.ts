@@ -134,7 +134,10 @@ export class Connection extends EventTarget {
 
     if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
       try {
+        performance.mark?.('dogfight:decode-start');
         const message = binaryCodec.decode(data);
+        performance.mark?.('dogfight:decode-end');
+        performance.measure?.('dogfight:decode', 'dogfight:decode-start', 'dogfight:decode-end');
         this.#emit(message.type, message);
       } catch (error: unknown) {
         const reason = error instanceof Error ? error.message : String(error);

@@ -8,6 +8,8 @@ export * from './sim/rng.ts';
 export * from './sim/vector.ts';
 export * from './sim/entity.ts';
 export * from './sim/arena.ts';
+export * from './sim/pool.ts';
+export * from './sim/spatial_hash.ts';
 export * from './sim/collision.ts';
 export * from './sim/behaviors.ts';
 export * from './sim/bullet.ts';

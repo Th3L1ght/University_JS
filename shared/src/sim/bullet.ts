@@ -22,8 +22,8 @@ export interface BulletSnapshot extends BaseEntitySnapshot {
 }
 
 export class Bullet extends Entity {
-  readonly owner: EntityId;
-  readonly damage: number;
+  owner: EntityId;
+  damage: number;
   ttl: number;
 
   constructor({ pos, vel, owner, damage, ttl }: BulletOptions) {
@@ -32,6 +32,26 @@ export class Bullet extends Entity {
     this.owner = owner;
     this.damage = damage;
     this.ttl = ttl;
+  }
+
+  /** Скидає стан для повторного використання з ObjectPool (стабільна форма V8 Hidden Class). */
+  reset({ pos, vel, owner, damage, ttl }: BulletOptions): this {
+    const start = Vector2.from(pos);
+    this.pos = start;
+    this.prevPos = start;
+    this.vel = Vector2.from(vel);
+    const heading = Math.atan2(vel.y, vel.x);
+    this.angle = heading;
+    this.prevAngle = heading;
+    this.radius = 3;
+    this.alive = true;
+    this.collidable = true;
+    this.components = {};
+    this.world = null;
+    this.owner = owner;
+    this.damage = damage;
+    this.ttl = ttl;
+    return this;
   }
 
   override update(dt: number): void {

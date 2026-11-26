@@ -569,6 +569,7 @@ export class NetClient extends EventTarget {
     const oldAngle = wrapAngle(ship.angle + this.#smoothOffset.angle);
     const wasAlive = ship.alive;
 
+    performance.mark?.('dogfight:reconcile-start');
     this.#pendingInputs = this.#pendingInputs.filter((item) => item.seq > this.#lastProcessedSeq);
     this.#world.syncPlayerShip(LOCAL_PLAYER_KEY, shipStateFromNet(serverShip));
 
@@ -581,6 +582,12 @@ export class NetClient extends EventTarget {
       }
       this.#world.muted = false;
     }
+    performance.mark?.('dogfight:reconcile-end');
+    performance.measure?.(
+      'dogfight:reconcile',
+      'dogfight:reconcile-start',
+      'dogfight:reconcile-end',
+    );
 
     if (!wasAlive || !ship.alive) {
       this.#correctionMag = 0;

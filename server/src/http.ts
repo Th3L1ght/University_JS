@@ -7,12 +7,14 @@ import { createReadStream } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import type http from 'node:http';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { pipeline } from 'node:stream/promises';
 import { validateRoomInput } from '@dogfight/shared';
+import type { BotInfo } from './bot.ts';
 import type { ServerConfig } from './config.ts';
 import type { Logger } from './logger.ts';
 import type { MatchManagerSummary, MatchStats } from './match.ts';
-import { RoomError, type RoomManager } from './rooms.ts';
+import { RoomError, type Room, type RoomManager } from './rooms.ts';
 
 export const MIME_TYPES: Readonly<Record<string, string>> = Object.freeze({
   '.html': 'text/html; charset=utf-8',
@@ -149,6 +151,7 @@ export interface RequestContext {
   readonly config: ServerConfig;
   readonly rooms: RoomManager;
   readonly logger: Logger;
+  readonly addBots?: (room: Room, count: number) => BotInfo[];
   readonly stats: () => {
     readonly connections: number;
     readonly matches: readonly MatchStats[];
@@ -291,12 +294,38 @@ export function createRequestHandler(
     if (pathname === '/api/stats') {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw methodNotAllowed(res, 'GET, HEAD');
       const { connections, matches, summary } = stats();
+      const elu = performance.eventLoopUtilization();
       sendJson(res, 200, {
         uptimeSec: Math.round(process.uptime()),
         connections,
+        memory: process.memoryUsage(),
+        eventLoopUtilization: {
+          idle: Math.round(elu.idle * 100) / 100,
+          active: Math.round(elu.active * 100) / 100,
+          utilization: Math.round(elu.utilization * 10000) / 10000,
+        },
         summary,
         matches,
       });
+      return;
+    }
+
+    const botsRoute = /^\/api\/rooms\/([^/]+)\/bots$/.exec(pathname);
+    if (botsRoute && botsRoute[1]) {
+      if (req.method !== 'POST') throw methodNotAllowed(res, 'POST');
+      const room = rooms.get(botsRoute[1]);
+      if (!room) throw new HttpError(404, 'room_not_found', 'кімнату не знайдено');
+      const body = await readJson(req, config.limits.maxBodyBytes);
+      const count =
+        body && typeof body === 'object' && 'count' in body && typeof body.count === 'number'
+          ? body.count
+          : 1;
+      if (!Number.isInteger(count) || count < 1 || count > 16) {
+        sendJson(res, 400, { error: 'validation_failed', details: ['count має бути цілим 1..16'] });
+        return;
+      }
+      const added = context.addBots ? context.addBots(room, count) : [];
+      sendJson(res, 201, { room: room.id, bots: added });
       return;
     }
 

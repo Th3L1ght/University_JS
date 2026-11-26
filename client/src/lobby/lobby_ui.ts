@@ -150,9 +150,10 @@ export function createLobbyUi({
   columns.append(rosterColumn, chatColumn);
 
   const leaveButton = button('Покинути', 'lobby__button--secondary');
+  const addBotButton = button('+ Бот', 'lobby__button--secondary');
   const startButton = button('Почати матч');
   const panelActions = element('div', 'lobby__actions');
-  panelActions.append(leaveButton, startButton);
+  panelActions.append(leaveButton, addBotButton, startButton);
   panel.append(roomTitle, connectionStatus, columns, panelActions);
 
   root.append(title, subtitle, modeBadge, browse, panel);
@@ -413,6 +414,31 @@ export function createLobbyUi({
   });
 
   leaveButton.addEventListener('click', () => lobby.leaveRoom());
+
+  addBotButton.addEventListener('click', () => {
+    if (!currentRoom) return;
+    addBotButton.disabled = true;
+    void fetch(`./api/rooms/${encodeURIComponent(currentRoom.id)}/bots`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ count: 1 }),
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((data: unknown) => {
+        const count =
+          data && typeof data === 'object' && 'bots' in data && Array.isArray(data.bots)
+            ? data.bots.length
+            : 1;
+        appendChat({ system: true, text: `Додано ШІ-бота (+${count})` });
+      })
+      .catch((error: unknown) => {
+        const msg = error instanceof Error ? error.message : String(error);
+        appendChat({ system: true, text: `Не вдалося додати бота: ${msg}` });
+      })
+      .finally(() => {
+        addBotButton.disabled = false;
+      });
+  });
 
   startButton.addEventListener('click', () => {
     if (!currentRoom) return;

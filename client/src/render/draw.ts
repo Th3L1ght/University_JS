@@ -306,7 +306,11 @@ function drawHud(
   ctx.fillStyle = 'rgba(190, 215, 255, 0.9)';
   ctx.fillText(`Steps/s:     ${metrics.stepsPerSec.toFixed(1)}`, 14, 12);
   ctx.fillText(`FPS:         ${metrics.fps.toFixed(1)}`, 14, 32);
-  ctx.fillText(`Frame time:  ${metrics.frameTimeMs.toFixed(2)} ms`, 14, 52);
+  ctx.fillText(
+    `Frame ms:    ${metrics.frameTimeMs.toFixed(2)} (p50 ${metrics.frameP50Ms.toFixed(1)} / p95 ${metrics.frameP95Ms.toFixed(1)} / p99 ${metrics.frameP99Ms.toFixed(1)})`,
+    14,
+    52,
+  );
 
   const ship = world.player;
   const hp = ship ? ship.hp : 0;
@@ -373,6 +377,7 @@ export function drawFrame(
   now: number,
   sheets: Readonly<Record<string, LoadedSpriteSheet>>,
   session: DrawSession | null = null,
+  drawOverlay?: (ctx: CanvasRenderingContext2D) => void,
 ): void {
   drawBackground(ctx, view);
   const arena = { width: world.width, height: world.height };
@@ -390,12 +395,14 @@ export function drawFrame(
     ctx.rect(0, 0, arena.width, arena.height);
     ctx.clip();
     drawEntities(ctx, arena, world, { alpha, now, sheets, localShipId });
+    drawOverlay?.(ctx);
     ctx.strokeStyle = 'rgba(95, 215, 255, 0.25)';
     ctx.lineWidth = 1.5 / scale;
     ctx.strokeRect(0.5, 0.5, arena.width - 1, arena.height - 1);
     ctx.restore();
   } else {
     drawEntities(ctx, arena, world, { alpha, now, sheets, localShipId });
+    drawOverlay?.(ctx);
   }
 
   drawHud(ctx, view, world, metrics, session);

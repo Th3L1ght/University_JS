@@ -234,13 +234,15 @@ export class Ship extends Entity {
     this.#fireCooldown = this.hasBuff('rapid') ? p.rapidFireInterval : p.fireInterval;
 
     const direction = Vector2.fromAngle(this.angle);
-    const bullet = new Bullet({
+    const bulletOpts = {
       pos: this.pos.add(direction.scale(p.noseOffset)),
       vel: this.vel.add(direction.scale(p.bulletSpeed)),
       owner: this.id,
       damage: p.bulletDamage,
       ttl: p.bulletTtl,
-    });
+    };
+    const acquired = this.world.acquireBullet?.(bulletOpts);
+    const bullet = acquired instanceof Bullet ? acquired : new Bullet(bulletOpts);
     this.world.spawn(bullet);
     this.world.emit('fired', { shooter: this, bullet, missile: false });
     return bullet;
@@ -252,13 +254,15 @@ export class Ship extends Entity {
     this.#missileCooldown = p.missileInterval;
 
     const direction = Vector2.fromAngle(this.angle);
-    const missile = new Bullet({
+    const missileOpts = {
       pos: this.pos.add(direction.scale(p.noseOffset)),
       vel: this.vel.scale(0.3).add(direction.scale(p.missileSpeed)),
       owner: this.id,
       damage: p.missileDamage,
       ttl: p.missileTtl,
-    });
+    };
+    const acquired = this.world.acquireBullet?.(missileOpts);
+    const missile = acquired instanceof Bullet ? acquired : new Bullet(missileOpts);
     attachHoming(missile, {
       turnRate: p.missileTurnRate,
       range: p.missileRange,

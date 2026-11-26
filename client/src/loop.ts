@@ -10,6 +10,9 @@ export interface LoopMetrics {
   stepsPerSec: number;
   fps: number;
   frameTimeMs: number;
+  frameP50Ms: number;
+  frameP95Ms: number;
+  frameP99Ms: number;
 }
 
 export interface LoopOptions {
@@ -24,7 +27,17 @@ export interface LoopHandle {
 }
 
 export function createLoop({ step = 1 / 60, simulate, render }: LoopOptions): LoopHandle {
-  const metrics: LoopMetrics = { stepsPerSec: 0, fps: 0, frameTimeMs: 0 };
+  const metrics: LoopMetrics = {
+    stepsPerSec: 0,
+    fps: 0,
+    frameTimeMs: 0,
+    frameP50Ms: 0,
+    frameP95Ms: 0,
+    frameP99Ms: 0,
+  };
+  const frameWindow = new Float64Array(120);
+  let frameIdx = 0;
+  let frameCount = 0;
 
   let rafId = 0;
   let running = false;
@@ -57,21 +70,39 @@ export function createLoop({ step = 1 / 60, simulate, render }: LoopOptions): Lo
     if (rawDeltaMs > STALL_RESET_MS) resetWindow(time);
 
     accumulator += Math.min(rawDeltaMs / 1000, MAX_FRAME_DT);
-    while (accumulator >= step) {
-      simulate(step);
-      accumulator -= step;
-      windowSteps += 1;
+    if (accumulator >= step) {
+      performance.mark?.('dogfight:sim-start');
+      while (accumulator >= step) {
+        simulate(step);
+        accumulator -= step;
+        windowSteps += 1;
+      }
+      performance.mark?.('dogfight:sim-end');
+      performance.measure?.('dogfight:simulate', 'dogfight:sim-start', 'dogfight:sim-end');
     }
 
+    performance.mark?.('dogfight:render-start');
     render(accumulator / step, metrics);
+    performance.mark?.('dogfight:render-end');
+    performance.measure?.('dogfight:render', 'dogfight:render-start', 'dogfight:render-end');
     windowFrames += 1;
 
-    metrics.frameTimeMs = performance.now() - workStart;
+    const frameMs = performance.now() - workStart;
+    metrics.frameTimeMs = frameMs;
+    frameWindow[frameIdx] = frameMs;
+    frameIdx = (frameIdx + 1) % frameWindow.length;
+    frameCount = Math.min(frameCount + 1, frameWindow.length);
 
     const elapsed = time - windowStart;
     if (elapsed >= METRICS_WINDOW_MS) {
       metrics.stepsPerSec = (windowSteps * 1000) / elapsed;
       metrics.fps = (windowFrames * 1000) / elapsed;
+      const sorted = Array.from(frameWindow.subarray(0, frameCount)).sort((a, b) => a - b);
+      const pick = (p: number): number =>
+        sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] ?? 0;
+      metrics.frameP50Ms = pick(0.5);
+      metrics.frameP95Ms = pick(0.95);
+      metrics.frameP99Ms = pick(0.99);
       resetWindow(time);
     }
   }

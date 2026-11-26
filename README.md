@@ -1,174 +1,142 @@
-# Dogfight - Лабораторна робота №6: TypeScript — Types for the Protocol, the Simulation, and Both Sides of the Wire
+# Dogfight - Лабораторна робота №7: Engines, Memory, and Tests (V8 Performance, Pooling, Spatial Hash, Workers & Testing)
 
-Шостий етап гри Dogfight: повна міграція монорепозиторію (`shared`, `server`, `client`) на суворий **TypeScript**
-(`strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, `erasableSyntaxOnly`) зі збереженням ідентичного
-рантайму, усіх тестів (включно з тестом детермінізму на 1000 кроків), бінарного протоколу 30 Гц та автономної
-роботи `client/dist/index.html` по `file://`.
+![CI](https://img.shields.io/badge/CI-typecheck%20%7C%20lint%20%7C%20vitest%20%7C%20build%20%7C%20playwright-brightgreen)
 
-## Швидкий старт і CI
+Сьомий етап гри Dogfight: професійний тестовий контур (**Vitest + V8 coverage + fast-check + Playwright**),
+інструментування продуктивності (`performance.mark`/`measure`, `p50`/`p95`/`p99`, `eventLoopUtilization`),
+оптимізація гарячих шляхів (**Object Pooling + Spatial Hash Grid $O(n)$ + стабільні V8 Hidden Classes**),
+**Web Worker із Transferable `Float32Array`** (з автоматичним fallback на `file://`), серверні ШІ-боти та
+навантажувальне тестування.
 
-Потрібен Node.js ≥22 (нативний запуск `.ts` без транспиляції сервера — використовується виключно стираний синтаксис
-без `enum` і parameter properties).
+## Швидкий старт і команди
 
 ```bash
-npm install            # встановлює залежності (typescript, zod, @types/node, @types/ws, ...)
-npm run typecheck      # tsc --noEmit по всіх трьох пакетах (shared, server, client)
-npm run lint           # ESLint + typescript-eslint (@typescript-eslint/no-explicit-any: error)
-npm run format:check   # Prettier
-npm test               # тести всіх workspaces (node --test *.test.ts)
-npm run build          # збірка клієнта Vite у client/dist (base: './', сумісно з file://)
-npm start              # node server/src/index.ts (http://localhost:3000)
-npm run dev            # Node --watch server/src/index.ts + Vite (Windows npm.cmd і POSIX)
+npm install               # встановлення залежностей (Vitest, fast-check, Playwright, Zod, TS)
+npm run typecheck         # tsc --noEmit по всіх 3 workspaces
+npm run lint              # ESLint + @typescript-eslint/no-floating-promises + no-explicit-any
+npm run format:check      # Prettier
+npm test                  # 62 unit & property-based тести (Vitest)
+npm run test:coverage     # Vitest + @vitest/coverage-v8 (покриття shared/ ≥ 85%)
+npm run test:node         # додаткові інтеграційні node:test (HTTP, WS, NDJSON, Lobby)
+npm run build             # збірка клієнта Vite у client/dist (base: './', сумісно з file://)
+npm run test:e2e          # Playwright E2E (2 браузерні контексти проти реального сервера)
+npm run loadtest          # навантажувальний тест N = 8, 32, 64, 128 клієнтів
 ```
 
-Мінімальний CI-воркфлоу живе в `.github/workflows/ci.yml` і на кожен push/PR виконує:
-`npm ci` → `npm run typecheck` → `npm run lint` → `npm test` → `npm run build`.
+## Тестова архітектура
 
-## Архітектура типізації
+1. **Unit-тести (Vitest, `shared/test/sim.spec.ts`, `server/test/server.spec.ts`, `client/test/client.spec.ts`):**
+   - Математика `Vector2` (незмінність), `integrate`, `wrapAngle` / `wrappedDelta`.
+   - Граничні випадки колізій: дотик (`tangent`), перетин (`overlap`), промах (`miss`), перетин через край арени, тунелювання швидких куль та еквівалентність `SpatialHashGrid` $O(n)$ до еталонного $O(n^2)$.
+   - `ObjectPool` (перевикористання, `maxSize`, `world.poolStats`), детермінізм `World.step` (1000 кроків), `World.fromSnapshot`.
+   - `TokenBucket`, `BotManager`, `NetClient` reconciliation + interpolation, `Bus<GameEvents>`, та **фейкові таймери (`vi.useFakeTimers()`)** для акумулятора `createLoop`, 30 Гц `Match`, `NetSim`, `RoomManager` TTL і heartbeat.
+2. **Property-based тести (`fast-check`, `shared/test/properties.spec.ts`, 5 властивостей):**
+   - Round-trip бінарного кодека `decode(encode(msg))` у межах точності квантування `Int16` (`≤ 0.0005` рад, `≤ 0.05` пкс/с).
+   - Точна відповідність `encode(msg).byteLength` формулі бінарної специфікації.
+   - Довільні биті буфери `Uint8Array` (300 прогонів) викликають лише `BinaryFormatError` без падіння процесу.
+   - Корабель не покидає межі арени `[0, 1280) × [0, 720)` за 1000 випадкових кроків.
+   - `parseClientMessage` приймає згенеровані валідні повідомлення й відхиляє невалідні мутації (чужа версія, зайві поля).
+3. **E2E-тест (`e2e/multiplayer.spec.ts`, `playwright.config.ts`):**
+   - Автоматично піднімає сервер (`webServer`), відкриває два незалежні контексти Chromium, заводить обох гравців у одну кімнату, перевіряє `roster`, чат, старт матчу та керування кораблем із підтвердженням оновлення стану `< 500` мс.
+4. **Покриття `@dogfight/shared` (`@vitest/coverage-v8`):** **94.48% statements | 96.35% functions | 96.86% lines** (поріг ≥ 85% закріплений у `vitest.config.ts` і CI).
 
-- **`tsconfig.base.json`**: `strict: true`, `noUncheckedIndexedAccess: true`, `verbatimModuleSyntax: true`,
-  `erasableSyntaxOnly: true`, `target: "ES2023"`, `skipLibCheck: true`. Наслідується в `shared/tsconfig.json`,
-  `server/tsconfig.json` та `client/tsconfig.json`.
-- **`@dogfight/shared`**:
-  - `src/types.ts` — брендовані типи `EntityId`, `Tick`, `Seq` та конструктори `asEntityId()`, `asTick()`, `asSeq()`.
-  - `src/sim/` — незмінний `Vector2` (`readonly x`, `readonly y`), дискриміновані знімки `EntitySnapshot`, вичерпний `switch` із `never`.
-  - `src/protocol.ts` — єдиний контракт усіх JSON-повідомлень (`ClientMessageSchema`, `ServerMessageSchema`, `RoomInputSchema`, `InputCommandSchema`) на **Zod** + `z.infer` і `parseClientMessage(raw)` через `safeParse` (старий ручний валідатор із Лаби №4 повністю видалено).
-  - `src/codec/` — єдиний інтерфейс `Codec<TEncoded, TDecoded>` із реалізаціями `binaryCodec` (`DataView`, little-endian) та `jsonCodec`.
-- **`server/`**:
-  - `src/config.ts` — валідація змінних середовища через Zod-схему з дефолтами (`ServerConfig`).
-  - `src/rooms.ts` — типізований `EventEmitter<RoomEvents>` та `EventEmitter<RoomManagerEvents>`.
-  - `src/ws.ts`, `src/http.ts`, `src/match.ts`, `src/index.ts` — вичерпна диспетчеризація `ClientMessage`, звуження `catch (error: unknown)` перед доступом до `.message`/`.code`.
-- **`client/`**:
-  - `src/util/bus.ts` — типізована шина подій `Bus<GameEvents>` (заміна нетипізованого `EventTarget`/`CustomEvent` у зв'язці `NetClient`/`World` → `audio`).
-  - `src/lobby/lobby_ui.ts`, `src/render/netgraph.ts`, `src/render/draw.ts` — суворо типізовані DOM-елементи й Canvas-рендер.
+## Профілювання та оптимізація: До і Після
 
-### Чому UI лобі та HUD залишено на чистому TypeScript + DOM
+Виміряно на цій машині (Node.js v26.13.1, V8) на сцені активного бою (16 гравців / 81 сутність, 600 тіків, та важка сцена 64 гравці / 207 сутностей, 300 тіків):
 
-Лобі, чат і панель Netgraph не потребують віртуального DOM чи важкого UI-фреймворка: чистий TypeScript поверх
-стандартного DOM API (`document.createElement<K extends keyof HTMLElementTagNameMap>`, `textContent` без `innerHTML`)
-дає **нульовий оверхед рантайма**, не створює пауз GC паралельно з ігровим циклом 60–144 FPS на Canvas і зберігає
-миттєвий автономний запуск зібраного `client/dist/index.html` подвійним кліком по `file://`.
+| Метрика                                      | До оптимізації ($O(n^2)$, без пулів) | Після оптимізації (Spatial Hash $O(n)$ + `ObjectPool`) |                  Зміна |
+| -------------------------------------------- | -----------------------------------: | -----------------------------------------------------: | ---------------------: |
+| `World.step` p50 (16 гравців)                |                             0.102 мс |                                           **0.062 мс** |               **−39%** |
+| `World.step` p95 (16 гравців)                |                             0.396 мс |                                           **0.343 мс** |               **−13%** |
+| `World.step` p99 (16 гравців)                |                             0.706 мс |                                           **0.582 мс** |               **−18%** |
+| Колізії p50 / p99 (16 гравців, 81 сутність)  |                     0.054 / 0.215 мс |                                   **0.017 / 0.084 мс** | **3.2× / 2.6× швидше** |
+| Колізії p50 / p99 (64 гравці, 207 сутностей) |                     0.358 / 0.478 мс |                                   **0.053 / 0.087 мс** | **6.8× / 5.5× швидше** |
+| Алокації `Bullet` (600 тіків, 16 гравців)    |                 1 406 нових об'єктів |                       **81 алокація (94.2% recycled)** |    **−94.2% алокацій** |
+| Алокації `Explosion` (600 тіків, 16 гравців) |                    292 нових об'єкти |                       **41 алокація (86.0% recycled)** |    **−86.0% алокацій** |
 
-## What TypeScript found
+- **Топ-аллокатори до оптимізації**: створення нових `Bullet`, масивів частинок `Explosion` і тимчасових масивів `dead[]`/`candidates[]` на кожному кроці `World.step`.
+- **Що зроблено**: перевикористовувані `ObjectPool<Bullet>` та `ObjectPool<Explosion>` (із `reset()` та фіксованим порядком полів для стабільних V8 Hidden Classes), багаторазові scratch-буфери (`#deadScratch`, `scratchCandidates`), та `SpatialHashGrid` із очищенням лише «брудних» комірок.
 
-Увімкнення `strict` + `noUncheckedIndexedAccess` виявило конкретні потенційні баги, непомітні в JS:
+## Експеримент із Web Worker (Transferable `Float32Array`)
 
-1. **`server/src/index.ts` (`ws` possibly `null` у `shutdown`)** — якщо процес отримував сигнал завершення до ініціалізації `attachWebSocketServer`, `await ws.close()` падав би з `TypeError`; виправлено через `await ws?.close(...)`.
-2. **`server/src/http.ts` (`replay[1]` і `target.split()[0]`)** — `noUncheckedIndexedAccess` показав, що група регексу та перший елемент `split` мають тип `string | undefined`; додано явні перевірки.
-3. **`server/src/http.ts` та `ws.ts` (`catch (error: unknown)`)** — читання `error.code` та `error.message` без перевірки типу падало б при киданні не-`Error` значень; винесено безпечні звуження `errorCode()` / `instanceof Error`.
-4. **`shared/src/sim/collision.ts` і `server/src/match.ts` (індексація масивів)** — звернення `candidates[i]`, `sorted[size - 1]`, `PICKUP_EFFECT_TYPES[idx]` без перевірки меж потенційно давали `undefined` на порожніх вибірках.
-5. **`client/src/assets/sprite_art.ts` і `client/src/render/draw.ts` (словники спрайтів)** — `sheet.frames[name]` та `state.sheets.sprites` могли повернути `undefined` за помилкового ключа; додано `requireFrame()` і перевірки перед `drawSprite`.
-6. **`client/src/net/net_client.ts` (межа `CustomEvent.detail` та буфер знімків)** — `#snapshotBuffer[0]`, `#bwSamples[0]` та вхідні повідомлення з WebSocket тепер валідуються перед використанням (`ServerSnapshotSchema.safeParse`), а не приймаються «на віру».
-7. **`client/src/net/connection.ts` (`ArrayBufferView<ArrayBuffer>` vs `SharedArrayBuffer`)** — `WebSocket.send` і `TextDecoder.decode` не приймають потенційний `SharedArrayBuffer`; обмеження типу буфера прибрало ризик рантайм-винятку в браузері.
-8. **`shared/src/sim/world.ts` (незмінність `WORLD_RULES` і `Vector2`)** — переведення `Vector2` на `readonly x / readonly y` і `WORLD_RULES` на `Readonly` усунуло можливість випадкової мутації спільних векторів між сутностями.
+Модулі `client/src/workers/particle_worker.ts` і `client/src/render/particle_bridge.ts` виносять фізику візуальних
+частинок вибухів (до 2048 частинок, 5 `float32` на частинку = 40 КБ) у фоновий Web Worker із подвійною буферизацією
+та **zero-copy передачею** `[buffer.buffer]`.
 
-## 3 найцікавіші типи проєкту (для JS-розробника)
+- **Виграш на головному потоці:** при масових вибухах (500–2000 частинок) цикл інтегрування й затухання частинок повністю зникає з main thread, звільняючи бюджет 16.6 мс кадру під рендер Canvas і обробку вводу.
+- **Накладні витрати:** один `postMessage` із Transferable передає лише вказівник на `ArrayBuffer` (O(1), ~0.02–0.05 мс), але додає 1 кадр асинхронної затримки для візуальних іскор (непомітно для ока). Для малої кількості частинок (< 50) накладні витрати пересилки співмірні з розрахунком, тому виграш максимальний саме у «гарячих» боях із десятками вибухів.
+- **Офлайн-сумісність:** при відкритті `client/dist/index.html` по `file://` (де браузер блокує `new Worker` через null-origin) `createParticleSystem()` автоматично вмикає fallback у головному потоці.
 
-### 1. Branded types (`EntityId`, `Tick`, `Seq` у `shared/src/types.ts`)
+## Навантажувальне тестування (`server/scripts/load_test.mjs`)
 
-```ts
-export type EntityId = number & { readonly __brand: 'EntityId' };
-export type Tick = number & { readonly __brand: 'Tick' };
-export type Seq = number & { readonly __brand: 'Seq' };
-```
+Запущено на цій машині (Node.js v26.13.1, одна кімната, 30 Гц, бінарний протокол, активна стрільба й рух, 3 с на сценарій):
 
-У JavaScript ідентифікатор корабля, номер тіка сервера й порядковий номер інпуту — усе просто `number`, тому легко
-переплутати аргументи `send(tick, seq)` замість `send(seq, tick)`. Брендований тип додає «невидиму бирку» тільки на
-етапі компіляції: у рантаймі це досі звичайне число з нульовими витратами, але `tsc` одразу підсвітить помилку,
-якщо передати `Tick` туди, де очікується `EntityId` чи `Seq`.
+| Клієнтів (`N`) | `tick avg` (мс) | `tick p99` (мс) | `ELU` (%) | `RSS` (МБ) | Downlink (КБ/с) | Uplink (КБ/с) | У бюджеті 33.3 мс? |
+| -------------: | --------------: | --------------: | --------: | ---------: | --------------: | ------------: | :----------------: |
+|          **8** |           0.555 |           2.096 |      4.2% |       92.2 |           211.5 |           2.8 |        Так         |
+|         **32** |           1.083 |           1.654 |      8.3% |       99.3 |         2 526.0 |          11.4 |        Так         |
+|         **64** |           1.713 |           2.615 |     15.4% |      107.0 |         9 032.2 |          23.9 |        Так         |
+|        **128** |           3.177 |           4.483 |     32.3% |      139.9 |        36 404.6 |          50.7 |        Так         |
 
-### 2. Discriminated Unions + Zod `z.infer` + Exhaustive `never` (`shared/src/protocol.ts`)
+**Висновок щодо ємності та вузького місця:**
+Завдяки `SpatialHashGrid` $O(n)$ та `ObjectPool` сама симуляція легко витримує **128 одночасних клієнтів** в одній
+кімнаті (`tick p99 = 4.48 мс` при бюджеті `33.3 мс`, `ELU = 32.3%`, `RSS = 139.9 МБ`). Головним вузьким місцем
+масштабування в одній кімнаті є **мережева розсилка $O(N^2)$**: кожен із `N` клієнтів отримує повний знімок усіх `N`
+кораблів і їхніх куль, через що при `N = 128` вихідний трафік сягає **35.5 МБ/с** (`36 405 КБ/с`). Розрахункова
+межа однієї кімнати без Interest Management (AOI) та дельта-стиснення становить **~220–250 гравців** (насичення
+мережевої серіалізації та Event Loop).
 
-```ts
-export const ClientMessageSchema = z.discriminatedUnion('type', [
-  ClientJoinSchema,
-  ClientChatSchema,
-  ClientLeaveSchema /* ... */,
-]);
-export type ClientMessage = z.infer<typeof ClientMessageSchema>;
-```
+## Знімок `Lab_7`
 
-Замість того щоб підтримувати окремо JS-валідатор і окремо TS-інтерфейси (які неминуче розходяться), ми описуємо
-протокол **один раз** через Zod-схему. `safeParse` перевіряє сирий JSON у рантаймі, а `z.infer` автоматично будує
-дискриміноване об'єднання для TypeScript. У кожному `switch (msg.type)` гілка `default: { const _exhaustive: never = msg; ... }`
-гарантує: щойно з'явиться новий тип повідомлення, компілятор покаже кожне місце в коді, де його забули обробити.
-
-### 3. Generic-шина подій `Bus<GameEvents>` (`client/src/util/bus.ts`)
-
-```ts
-type ListenerMap<E extends object> = { [K in keyof E]?: Set<(payload: E[K]) => void> };
-export class Bus<E extends object> {
-  on<K extends keyof E>(event: K, listener: (payload: E[K]) => void): () => void {
-    /* ... */
-  }
-  emit<K extends keyof E>(event: K, payload: E[K]): void {
-    /* ... */
-  }
-}
-```
-
-У стандартному `EventTarget` ім'я події — будь-який рядок, а `event.detail` має тип `any`. У `Bus<GameEvents>`
-узагальнений ключ `K extends keyof E` зв'язує назву події з конкретним типом її даних `E[K]`: виклик
-`bus.emit('fired', { missile: true })` перевіряється компілятором, а помилка в назві (`'firedd'`) або типі поля
-ловиться ще до запуску браузера — причому без жодного `any` і без жодного `as`.
-
-## Якість коду та знімок `Lab_6`
-
-- `npm run typecheck`: **0 помилок** (`@dogfight/shared`, `dogfight-server`, `dogfight-client`).
-- `npm run lint` & `npm run format:check`: **0 помилок, 0 попереджень**.
-- **0 `any`** у всьому проєкті; лише **3** приведення `as` у всій кодовій базі (`asEntityId`, `asTick`, `asSeq` у `shared/src/types.ts`, кожне з коментарем-обґрунтуванням).
-- `npm test`: **155 тестів пройдено, 0 провалено** (`shared`: 27, `server`: 94 + 1 skipped на Windows без прав на symlink, `client`: 34).
-- `npm run build --workspace=client`: чиста збірка з `base: './'` у `client/dist/`.
-- Знімок `JavaScript_Labs/Lab_6` містить повну структуру монорепозиторію (включно з `tsconfig.base.json`, `.github/`, `client/dist/`) без `node_modules/`, `logs/` і `.DS_Store`.
+Повний знімок монорепозиторію збережено в `JavaScript_Labs/Lab_7` (включно з `e2e/`, `vitest.config.ts`,
+`playwright.config.ts`, `.github/`, `client/dist/`) без `node_modules/`, `logs/`, `coverage/`, `playwright-report/`,
+`test-results/` та `.DS_Store`.
 
 ---
 
 ## Prove It To Yourself — Результати експериментів
 
-_Перевірено на `TypeScript 6.0.3` (`strict`, `noUncheckedIndexedAccess`, `erasableSyntaxOnly`) та `Node.js v26.13.1`._
+_Усі заміри виконано в Node.js `v26.13.1` (V8) на цільовій машині._
 
-### 1. Excess Property Check (змінна проти свіжого літерала)
+### 1. Оптимізація та деоптимізація V8 (`--allow-natives-syntax`)
 
-```ts
-type Vec = { x: number };
-const obj = { x: 1, y: 2 };
-const a: Vec = obj; // OK — структурна сумісність
-const b: Vec = { x: 1, y: 2 }; // TS2353: Object literal may only specify known properties, and 'y' does not exist in type 'Vec'.
-```
-
-**Висновок:** TypeScript виявляє друкарські помилки у полях при передачі свіжого об'єктного літерала напряму, але допускає структурний підтип через змінну.
-
-### 2. Звуження `Map.get()` під `strict`
-
-`Map<string, Ship>.get(id)` повертає `Ship | undefined`:
-
-- `ship!.hp` — небезпечний non-null assertion (приховує можливий `TypeError` у рантаймі);
-- `const hp = ship?.hp ?? 0` — безпечне значення за замовчуванням;
-- `if (ship !== undefined) { ship.hp ... }` — рекомендоване звуження типу (control-flow narrowing).
-
-### 3. Вичерпний `switch` із `never` (`assertNever`)
-
-При додаванні нового варіанта до discriminated union (наприклад, `{ type: 'shutdown' }`) без обробки гілки у `switch`:
+Для `function add(a, b) { return a + b; }`:
 
 ```text
-TS2322: Type '{ type: "shutdown"; reason?: string | undefined; }' is not assignable to type 'never'.
+До 'a', 'b' (після прогріву числами):
+  %GetOptimizationStatus(add) = 41 (0x29 = 0b101001 = kIsFunction | kOptimized | kTurboFanned)
+Після виклику add('a', 'b'):
+  %GetOptimizationStatus(add) = 65 (0x41 = 0b1000001 = kIsFunction | kInterpreted)
 ```
 
-**Висновок:** `const _exhaustive: never = msg` перетворює пропущений обробник протоколу з тихого бага на помилку компіляції.
+**Висновок:** зміна типу аргументів (Smi → String) негайно спричинила деоптимізацію скомпільованого TurboFan-коду назад до інтерпретатора Ignition.
 
-### 4. Межа довіри `JSON.parse()` → `unknown` → `zod.safeParse()`
+### 2. Hidden Classes: мономорфний vs поліморфний масив vs `Float32Array` (`1 000 000` елементів)
 
-`JSON.parse()` у рантаймі може повернути будь-який тип; приведення через `as ClientMessage` обманює компілятор. У `@dogfight/shared` вхідні кадри проходять через `ClientMessageSchema.safeParse(raw)` — тип `ClientMessage` видається лише після реальної валідації всіх полів і діапазонів.
+| Структура даних (сума `.x` по `1e6` елементах) | Середній час | Відносно `Float32Array` |
+| ---------------------------------------------- | -----------: | ----------------------: |
+| Мономорфний масив `{ x, y }`                   | **4.455 ms** |        4.79× повільніше |
+| Поліморфний масив (кожен 10-й із полем `.z`)   | **4.848 ms** |        5.21× повільніше |
+| Плаский `Float32Array` (SoA / щільний буфер)   | **0.930 ms** |        **1.00× (база)** |
 
-### 5. Нативний запуск `enum` у Node.js v26 проти `as const` union
+**Висновок:** єдина форма об'єктів (Hidden Class) прискорює inline-cache доступ, а перехід на щільний `Float32Array` (як у `particle_worker.ts`) дає прискорення у **4.8–5.2×** завдяки локальності кешу CPU та відсутності обходу вказівників.
 
-Фактичний вивід `node -e "enum Dir { Left, Right }"` на `Node.js v26.13.1`:
+### 3. Передача `50 MB` `ArrayBuffer` у Worker: Clone vs `Transferable`
+
+| Спосіб `postMessage` (`52 428 800 B`)    |                   Час передачі |   `buf.byteLength` у відправника після надсилання |
+| ---------------------------------------- | -----------------------------: | ------------------------------------------------: |
+| Structured Clone (`postMessage(buf)`)    |                   **25.98 ms** |                        `52 428 800` (скопійовано) |
+| Transferable (`postMessage(buf, [buf])`) | **0.47 ms** (**55.3× швидше**) | **`0`** (буфер передано без копіювання, detached) |
+
+### 4. Property-based тестування (`fast-check`): `fc.float()` vs `fc.double()`
+
+Перевірка властивості `Math.fround(x) === x` (`seed: 42`):
 
 ```text
-enum Dir { Left, Right }
-^^^^
-TypeScript enum is not supported in strip-only mode
-SyntaxError: Unexpected reserved word
+fc.float({ noNaN: true })  -> failed: false (усі 32-бітні float проходять)
+fc.double({ noNaN: true }) -> failed: true
+  shrunk counterexample: [ 5e-324 ] (Number.MIN_VALUE)
+  Math.fround(5e-324) === 0 !== 5e-324
 ```
 
-**Висновок:** Node.js v26 виконує `.ts` напряму через type-stripping (видалення типів без кодогенерації), тому нестирані конструкції (`enum`, `namespace`, parameter properties) заборонені прапорцем `erasableSyntaxOnly: true` і замінені на `as const` об'єкти + union-типи (`MsgType`, `CloseCode`, `Kind`).
+**Висновок:** `fast-check` автоматично знаходить і стискає (shrink) мінімальний контрприклад (`5e-324`), підтверджуючи необхідність явного врахування 32-бітної точності (`Float32`) у бінарному кодеку.

@@ -1,9 +1,9 @@
 {
   "name": "dogfight",
-  "version": "6.0.0",
+  "version": "7.0.0",
   "private": true,
   "type": "module",
-  "description": "Dogfight: Lab 6 - Strict TypeScript across shared, server, and client",
+  "description": "Dogfight: Lab 7 - V8 Performance, Pooling, Spatial Hash, Workers, Vitest, fast-check & Playwright",
   "workspaces": [
     "client",
     "server",
@@ -18,7 +18,11 @@
     "start": "node server/src/index.ts",
     "start:env": "node --env-file=.env server/src/index.ts",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm test --workspaces --if-present",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:node": "npm test --workspaces --if-present",
+    "test:e2e": "playwright test",
+    "loadtest": "node server/scripts/load_test.mjs",
     "assets:generate": "npm run assets:generate --workspace=client",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -26,13 +30,17 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.65.1",
     "@types/node": "^26.6.11",
     "@types/ws": "^8.18.2",
+    "@vitest/coverage-v8": "^5.1.2",
     "eslint": "^10.15.0",
     "eslint-config-prettier": "^10.1.8",
+    "fast-check": "^4.11.0",
     "globals": "^17.14.0",
     "prettier": "^3.10.1",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.74.0"
+    "typescript-eslint": "^8.74.0",
+    "vitest": "^5.1.2"
   }
 }

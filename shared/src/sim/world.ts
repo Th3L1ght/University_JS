@@ -8,11 +8,12 @@ import { asEntityId, assertNever, type EntityId } from '../types.ts';
 import { wrapEntity, wrappedDelta } from './arena.ts';
 import { Asteroid, type AsteroidSize, type AsteroidSnapshot } from './asteroid.ts';
 import { applyPickup, attachHoming, runBehaviors } from './behaviors.ts';
-import { Bullet, type BulletSnapshot } from './bullet.ts';
+import { Bullet, type BulletOptions, type BulletSnapshot } from './bullet.ts';
 import { findCollisions } from './collision.ts';
 import { Entity, Kind, type EntityKind, type PickupSnapshot, type WorldHost } from './entity.ts';
-import { Explosion, type ExplosionSnapshot } from './explosion.ts';
+import { Explosion, type ExplosionOptions, type ExplosionSnapshot } from './explosion.ts';
 import { createPickup, PICKUP_EFFECT_TYPES } from './pickup.ts';
+import { ObjectPool, type PoolStats } from './pool.ts';
 import { createRng, type Rng } from './rng.ts';
 import {
   IDLE_CONTROLS,
@@ -195,6 +196,22 @@ export class World extends EventTarget implements WorldHost, Iterable<Entity> {
   #nextId: number;
   #refillTimer: number;
   #pickupTimer: number;
+  #deadScratch: Entity[] = [];
+  #bulletPool = new ObjectPool<Bullet>(
+    () =>
+      new Bullet({
+        pos: Vector2.ZERO,
+        vel: Vector2.ZERO,
+        owner: asEntityId(0),
+        damage: 0,
+        ttl: 0,
+      }),
+    { maxSize: 512 },
+  );
+  #explosionPool = new ObjectPool<Explosion>(
+    () => new Explosion({ x: 0, y: 0, rng: () => 0, count: 0 }),
+    { maxSize: 128 },
+  );
 
   width: number;
   height: number;
@@ -228,6 +245,23 @@ export class World extends EventTarget implements WorldHost, Iterable<Entity> {
   get respawnIn(): number {
     if (this.#primaryId === null) return 0;
     return this.#players.get(this.#primaryId)?.respawnTimer ?? 0;
+  }
+
+  get poolStats(): { readonly bullets: PoolStats; readonly explosions: PoolStats } {
+    return { bullets: this.#bulletPool.stats, explosions: this.#explosionPool.stats };
+  }
+
+  acquireBullet(options: BulletOptions): Bullet {
+    const bullet = this.#bulletPool.acquire();
+    bullet.id = asEntityId(0);
+    return bullet.reset(options);
+  }
+
+  #spawnExplosion(options: ExplosionOptions): void {
+    const explosion = this.#explosionPool.acquire();
+    explosion.id = asEntityId(0);
+    explosion.reset(options);
+    this.spawn(explosion);
   }
 
   setSize(width: number, height: number): void {
@@ -401,14 +435,25 @@ export class World extends EventTarget implements WorldHost, Iterable<Entity> {
   }
 
   #sweep(): void {
-    const dead: Entity[] = [];
+    const dead = this.#deadScratch;
+    dead.length = 0;
     for (const entity of this.#entities.values()) {
       if (!entity.alive) dead.push(entity);
     }
-    for (const entity of dead) {
+    for (let i = 0; i < dead.length; i += 1) {
+      const entity = dead[i];
+      if (!entity) continue;
       this.#entities.delete(entity.id);
       entity.world = null;
+      if (entity instanceof Bullet) {
+        entity.id = asEntityId(0);
+        this.#bulletPool.release(entity);
+      } else if (entity instanceof Explosion) {
+        entity.id = asEntityId(0);
+        this.#explosionPool.release(entity);
+      }
     }
+    dead.length = 0;
   }
 
   // --- Знімки стану ---
@@ -586,17 +631,15 @@ export class World extends EventTarget implements WorldHost, Iterable<Entity> {
     const { x, y } = asteroid.pos;
     this.emit('exploded', { entity: asteroid, kind: Kind.ASTEROID, size: asteroid.size, x, y });
     this.#addScore(creditedPlayer, asteroid.score);
-    this.spawn(
-      new Explosion({
-        x,
-        y,
-        rng: this.#rng,
-        count: 6 + 5 * asteroid.size,
-        speed: 40 + 35 * asteroid.size,
-        life: 0.45 + 0.2 * asteroid.size,
-        tint: 'rock',
-      }),
-    );
+    this.#spawnExplosion({
+      x,
+      y,
+      rng: this.#rng,
+      count: 6 + 5 * asteroid.size,
+      speed: 40 + 35 * asteroid.size,
+      life: 0.45 + 0.2 * asteroid.size,
+      tint: 'rock',
+    });
 
     if (asteroid.size > 1) {
       const childSize: AsteroidSize = asteroid.size === 3 ? 2 : 1;
@@ -620,17 +663,15 @@ export class World extends EventTarget implements WorldHost, Iterable<Entity> {
   #destroyShip(ship: Ship): void {
     const { x, y } = ship.pos;
     this.emit('exploded', { entity: ship, kind: Kind.SHIP, size: 0, x, y });
-    this.spawn(
-      new Explosion({
-        x,
-        y,
-        rng: this.#rng,
-        count: 42,
-        speed: 240,
-        life: 1.1,
-        tint: 'ship',
-      }),
-    );
+    this.#spawnExplosion({
+      x,
+      y,
+      rng: this.#rng,
+      count: 42,
+      speed: 240,
+      life: 1.1,
+      tint: 'ship',
+    });
     const player = this.#playerByShipId(ship.id);
     if (player) player.respawnTimer = this.#rules.respawnDelay;
   }
