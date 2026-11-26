@@ -6,6 +6,10 @@ export function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
+export function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
 /** Зводить кут до діапазону (-PI, PI]. */
 export function wrapAngle(angle) {
   const wrapped = ((((angle + Math.PI) % TAU) + TAU) % TAU) - Math.PI;
