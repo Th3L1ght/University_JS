@@ -1,193 +1,174 @@
-# Dogfight - Лабораторна робота №5: Real-Time Networking (Authoritative Server, Prediction, Binary Protocols)
+# Dogfight - Лабораторна робота №6: TypeScript — Types for the Protocol, the Simulation, and Both Sides of the Wire
 
-П'ятий етап гри Dogfight: монорепозиторій (`client`, `server`, `shared`) із **авторитативним сервером** на 30 Гц,
-спільною детермінованою симуляцією (`@dogfight/shared`), бінарним протоколом поверх `ArrayBuffer` + `DataView`,
-**Client-Side Prediction & Server Reconciliation**, **Entity Interpolation**, емулятором поганої мережі
-(`Latency / Jitter / Drop`) та живим оверлеєм **Netgraph** (`Tab` або `F3`).
+Шостий етап гри Dogfight: повна міграція монорепозиторію (`shared`, `server`, `client`) на суворий **TypeScript**
+(`strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, `erasableSyntaxOnly`) зі збереженням ідентичного
+рантайму, усіх тестів (включно з тестом детермінізму на 1000 кроків), бінарного протоколу 30 Гц та автономної
+роботи `client/dist/index.html` по `file://`.
 
-## Швидкий старт
+## Швидкий старт і CI
 
-Потрібен Node.js ≥22 (`.nvmrc`).
-
-```bash
-npm install            # встановлює залежності всіх workspaces (client, server, shared)
-npm run build          # збірка клієнта в client/dist (base: './', сумісно з file://)
-npm start              # сервер: http://localhost:3000 (статика, REST, WebSocket)
-```
+Потрібен Node.js ≥22 (нативний запуск `.ts` без транспиляції сервера — використовується виключно стираний синтаксис
+без `enum` і parameter properties).
 
 ```bash
-npm run dev            # Node-сервер (--watch) + Vite (кросплатформенно, Windows npm.cmd + macOS/Linux)
-npm test               # тести всіх трьох пакетів (node:test): shared, server, client
-npm run lint           # ESLint по всьому монорепозиторію
+npm install            # встановлює залежності (typescript, zod, @types/node, @types/ws, ...)
+npm run typecheck      # tsc --noEmit по всіх трьох пакетах (shared, server, client)
+npm run lint           # ESLint + typescript-eslint (@typescript-eslint/no-explicit-any: error)
 npm run format:check   # Prettier
-npm run bench --workspace=@dogfight/shared   # бенчмарк JSON vs Binary (DataView)
+npm test               # тести всіх workspaces (node --test *.test.ts)
+npm run build          # збірка клієнта Vite у client/dist (base: './', сумісно з file://)
+npm start              # node server/src/index.ts (http://localhost:3000)
+npm run dev            # Node --watch server/src/index.ts + Vite (Windows npm.cmd і POSIX)
 ```
 
-**Офлайн-режим (`file://`)**: подвійний клік по `client/dist/index.html` без запущеного сервера, як і раніше,
-відкриває локальний матч із вбудованими даними й тією ж симуляцією з `@dogfight/shared`.
+Мінімальний CI-воркфлоу живе в `.github/workflows/ci.yml` і на кожен push/PR виконує:
+`npm ci` → `npm run typecheck` → `npm run lint` → `npm test` → `npm run build`.
 
-## Архітектура монорепозиторію
+## Архітектура типізації
 
+- **`tsconfig.base.json`**: `strict: true`, `noUncheckedIndexedAccess: true`, `verbatimModuleSyntax: true`,
+  `erasableSyntaxOnly: true`, `target: "ES2023"`, `skipLibCheck: true`. Наслідується в `shared/tsconfig.json`,
+  `server/tsconfig.json` та `client/tsconfig.json`.
+- **`@dogfight/shared`**:
+  - `src/types.ts` — брендовані типи `EntityId`, `Tick`, `Seq` та конструктори `asEntityId()`, `asTick()`, `asSeq()`.
+  - `src/sim/` — незмінний `Vector2` (`readonly x`, `readonly y`), дискриміновані знімки `EntitySnapshot`, вичерпний `switch` із `never`.
+  - `src/protocol.ts` — єдиний контракт усіх JSON-повідомлень (`ClientMessageSchema`, `ServerMessageSchema`, `RoomInputSchema`, `InputCommandSchema`) на **Zod** + `z.infer` і `parseClientMessage(raw)` через `safeParse` (старий ручний валідатор із Лаби №4 повністю видалено).
+  - `src/codec/` — єдиний інтерфейс `Codec<TEncoded, TDecoded>` із реалізаціями `binaryCodec` (`DataView`, little-endian) та `jsonCodec`.
+- **`server/`**:
+  - `src/config.ts` — валідація змінних середовища через Zod-схему з дефолтами (`ServerConfig`).
+  - `src/rooms.ts` — типізований `EventEmitter<RoomEvents>` та `EventEmitter<RoomManagerEvents>`.
+  - `src/ws.ts`, `src/http.ts`, `src/match.ts`, `src/index.ts` — вичерпна диспетчеризація `ClientMessage`, звуження `catch (error: unknown)` перед доступом до `.message`/`.code`.
+- **`client/`**:
+  - `src/util/bus.ts` — типізована шина подій `Bus<GameEvents>` (заміна нетипізованого `EventTarget`/`CustomEvent` у зв'язці `NetClient`/`World` → `audio`).
+  - `src/lobby/lobby_ui.ts`, `src/render/netgraph.ts`, `src/render/draw.ts` — суворо типізовані DOM-елементи й Canvas-рендер.
+
+### Чому UI лобі та HUD залишено на чистому TypeScript + DOM
+
+Лобі, чат і панель Netgraph не потребують віртуального DOM чи важкого UI-фреймворка: чистий TypeScript поверх
+стандартного DOM API (`document.createElement<K extends keyof HTMLElementTagNameMap>`, `textContent` без `innerHTML`)
+дає **нульовий оверхед рантайма**, не створює пауз GC паралельно з ігровим циклом 60–144 FPS на Canvas і зберігає
+миттєвий автономний запуск зібраного `client/dist/index.html` подвійним кліком по `file://`.
+
+## What TypeScript found
+
+Увімкнення `strict` + `noUncheckedIndexedAccess` виявило конкретні потенційні баги, непомітні в JS:
+
+1. **`server/src/index.ts` (`ws` possibly `null` у `shutdown`)** — якщо процес отримував сигнал завершення до ініціалізації `attachWebSocketServer`, `await ws.close()` падав би з `TypeError`; виправлено через `await ws?.close(...)`.
+2. **`server/src/http.ts` (`replay[1]` і `target.split()[0]`)** — `noUncheckedIndexedAccess` показав, що група регексу та перший елемент `split` мають тип `string | undefined`; додано явні перевірки.
+3. **`server/src/http.ts` та `ws.ts` (`catch (error: unknown)`)** — читання `error.code` та `error.message` без перевірки типу падало б при киданні не-`Error` значень; винесено безпечні звуження `errorCode()` / `instanceof Error`.
+4. **`shared/src/sim/collision.ts` і `server/src/match.ts` (індексація масивів)** — звернення `candidates[i]`, `sorted[size - 1]`, `PICKUP_EFFECT_TYPES[idx]` без перевірки меж потенційно давали `undefined` на порожніх вибірках.
+5. **`client/src/assets/sprite_art.ts` і `client/src/render/draw.ts` (словники спрайтів)** — `sheet.frames[name]` та `state.sheets.sprites` могли повернути `undefined` за помилкового ключа; додано `requireFrame()` і перевірки перед `drawSprite`.
+6. **`client/src/net/net_client.ts` (межа `CustomEvent.detail` та буфер знімків)** — `#snapshotBuffer[0]`, `#bwSamples[0]` та вхідні повідомлення з WebSocket тепер валідуються перед використанням (`ServerSnapshotSchema.safeParse`), а не приймаються «на віру».
+7. **`client/src/net/connection.ts` (`ArrayBufferView<ArrayBuffer>` vs `SharedArrayBuffer`)** — `WebSocket.send` і `TextDecoder.decode` не приймають потенційний `SharedArrayBuffer`; обмеження типу буфера прибрало ризик рантайм-винятку в браузері.
+8. **`shared/src/sim/world.ts` (незмінність `WORLD_RULES` і `Vector2`)** — переведення `Vector2` на `readonly x / readonly y` і `WORLD_RULES` на `Readonly` усунуло можливість випадкової мутації спільних векторів між сутностями.
+
+## 3 найцікавіші типи проєкту (для JS-розробника)
+
+### 1. Branded types (`EntityId`, `Tick`, `Seq` у `shared/src/types.ts`)
+
+```ts
+export type EntityId = number & { readonly __brand: 'EntityId' };
+export type Tick = number & { readonly __brand: 'Tick' };
+export type Seq = number & { readonly __brand: 'Seq' };
 ```
-package.json                 workspaces: ["client", "server", "shared"]
-scripts/dev.mjs              dev: Node-сервер + Vite (підтримка Windows npm.cmd і POSIX)
-shared/                      @dogfight/shared: чиста детермінована симуляція без DOM і node:*
-  src/sim/                   world.js, ship.js, bullet.js, asteroid.js, explosion.js, pickup.js,
-                             entity.js, arena.js, collision.js, behaviors.js, vector.js, rng.js
-                             (mulberry32, фіксований dt, toSnapshot / static fromSnapshot)
-  src/protocol.js            TICK_RATE = 30, типи повідомлень, validateInput, expandInputMessage
-  src/net_snapshot.js        buildSnapshotMessage, shipStateFromNet
-  src/codec/binary_codec.js  бінарний кодек на ArrayBuffer + DataView (little-endian)
-  src/codec/json_codec.js    JSON-кодек для порівняння трафіку й налагодження
-  src/hash.js                FNV-1a worldHash для тестів детермінізму
-  scripts/bench_codec.mjs    замір JSON vs Binary на 30 Гц (4 гравці)
-server/                      авторитативний сервер на node:http + ws
-  src/match.js               Match (30 Гц setTimeout без дрейфу setInterval, метрики тіка/джиттера)
-  src/netsim.js              NetSim (Latency / Jitter / Packet Drop injector на з'єднання)
-  src/ws.js                  бінарні кадри (INPUT/SNAPSHOT/PING/PONG) + керувальний JSON (ready/codec/netsim)
-  src/http.js                GET /health (з tick-метриками), GET /api/stats, /api/rooms, /api/replays/:id
-client/                      Vite + Canvas + Netcode
-  src/net/connection.js      WebSocket із socket.binaryType = "arraybuffer", облік bytesIn/bytesOut
-  src/net/net_client.js      Prediction, Reconciliation (+ smoothing ~100 мс), Entity Interpolation
-  src/render/netgraph.js     оверлей Netgraph (Tab / F3) зі sparkline-графіком і повзунками
+
+У JavaScript ідентифікатор корабля, номер тіка сервера й порядковий номер інпуту — усе просто `number`, тому легко
+переплутати аргументи `send(tick, seq)` замість `send(seq, tick)`. Брендований тип додає «невидиму бирку» тільки на
+етапі компіляції: у рантаймі це досі звичайне число з нульовими витратами, але `tsc` одразу підсвітить помилку,
+якщо передати `Tick` туди, де очікується `EntityId` чи `Seq`.
+
+### 2. Discriminated Unions + Zod `z.infer` + Exhaustive `never` (`shared/src/protocol.ts`)
+
+```ts
+export const ClientMessageSchema = z.discriminatedUnion('type', [
+  ClientJoinSchema,
+  ClientChatSchema,
+  ClientLeaveSchema /* ... */,
+]);
+export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 ```
 
-## HTTP API та керувальні повідомлення WebSocket
+Замість того щоб підтримувати окремо JS-валідатор і окремо TS-інтерфейси (які неминуче розходяться), ми описуємо
+протокол **один раз** через Zod-схему. `safeParse` перевіряє сирий JSON у рантаймі, а `z.infer` автоматично будує
+дискриміноване об'єднання для TypeScript. У кожному `switch (msg.type)` гілка `default: { const _exhaustive: never = msg; ... }`
+гарантує: щойно з'явиться новий тип повідомлення, компілятор покаже кожне місце в коді, де його забули обробити.
 
-| Ендпоінт / повідомлення                                                   | Призначення                                                                                                                      |
-| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /health`                                                             | стан сервера, uptime, кімнати, з'єднання, пам'ять і зведені `tick`-метрики (`avg/max` тривалість і джиттер)                      |
-| `GET /api/stats`                                                          | детальна статистика активних матчів: тік, сутності, `tickDurationMs`, `tickJitterMs` (`avg/p99/max`), лічильники вводу й трафіку |
-| `GET/POST /api/rooms`, `GET /api/replays/:id`                             | створення/список кімнат і потокова віддача NDJSON-журналів (`pipeline`)                                                          |
-| `WS /ws?latency=100&jitter=30&drop=0.02`                                  | підключення з початковою емуляцією поганої мережі                                                                                |
-| `ready { codec? }`, `codec { codec }`, `netsim { latency, jitter, drop }` | керувальні JSON-повідомлення входу в матч, перемикання `binary`/`json` і живої зміни емуляції мережі                             |
+### 3. Generic-шина подій `Bus<GameEvents>` (`client/src/util/bus.ts`)
 
-## Специфікація бінарного протоколу (`ArrayBuffer` + `DataView`)
+```ts
+type ListenerMap<E extends object> = { [K in keyof E]?: Set<(payload: E[K]) => void> };
+export class Bus<E extends object> {
+  on<K extends keyof E>(event: K, listener: (payload: E[K]) => void): () => void {
+    /* ... */
+  }
+  emit<K extends keyof E>(event: K, payload: E[K]): void {
+    /* ... */
+  }
+}
+```
 
-Усі багатобайтові числа кодуються строго в **little-endian (`true`)**. Кожен кадр починається з 4-байтного заголовка:
+У стандартному `EventTarget` ім'я події — будь-який рядок, а `event.detail` має тип `any`. У `Bus<GameEvents>`
+узагальнений ключ `K extends keyof E` зв'язує назву події з конкретним типом її даних `E[K]`: виклик
+`bus.emit('fired', { missile: true })` перевіряється компілятором, а помилка в назві (`'firedd'`) або типі поля
+ловиться ще до запуску браузера — причому без жодного `any` і без жодного `as`.
 
-| Зсув | Розмір | Тип     | Поле       | Опис                                                |
-| ---- | ------ | ------- | ---------- | --------------------------------------------------- |
-| `0`  | 1      | `Uint8` | `magic`    | `0xD6` (сигнатура Dogfight)                         |
-| `1`  | 1      | `Uint8` | `version`  | `1` (версія розкладки)                              |
-| `2`  | 1      | `Uint8` | `type`     | `1 = INPUT`, `2 = SNAPSHOT`, `3 = PING`, `4 = PONG` |
-| `3`  | 1      | `Uint8` | `reserved` | `0`                                                 |
+## Якість коду та знімок `Lab_6`
 
-### `INPUT` (клієнт → сервер, `15 + 2·count` байт; при `count = 3` — 21 байт)
-
-- `4`: `Uint32 seq` — порядковий номер команди.
-- `8`: `Uint32 tick` — оцінка поточного тіка сервера.
-- `12`: `Uint8 count` — кількість попередніх команд у пакеті (`0..4`, надлишковість проти втрат).
-- `13`: `Uint8 flags` — біт 0 `thrust`, біт 1 `fire`, біт 2 `missile`.
-- `14`: `Int8 turn` — поворот `[-1, 1] → [-127, 127]`.
-- `15 + 2·i`: `count` попередніх команд `{ Uint8 flags, Int8 turn }` (`seq-1, seq-2, ...`).
-
-### `PING` (12 байт) / `PONG` (16 байт)
-
-- `PING`: `4: Float64 clientTime`.
-- `PONG`: `4: Float64 clientTime`, `12: Uint32 serverTick`.
-
-### `SNAPSHOT` (сервер → клієнт, `19 + записи`)
-
-- `4`: `Uint32 tick`
-- `8`: `Uint32 lastProcessedSeq` — остання оброблена команда **цього** клієнта (фіксований зсув дозволяє серверу кодувати знімок один раз і підставляти 4 байти на одержувача).
-- `12`: `Uint8 nShips`, `13`: `Uint16 nAsteroids`, `15`: `Uint16 nBullets`, `17`: `Uint8 nPickups`, `18`: `Uint8 nEvents`.
-- **Запис судна (32 байти)**: `u32 id`, `f32 x`, `f32 y`, `f32 vx`, `f32 vy`, `i16 angle` (**квантування в 1/1000 рад**, похибка ≤ 0.0005 рад), `u8 hp`, `u8 flags` (`alive | thrust | rapid`), `u8 invulnerable` (0.1 с), `u8 fireCooldown` (мс), `u8 rapidLeft` (0.1 с), `u8 respawnIn` (0.1 с), `u32 score`.
-- **Запис астероїда (19 байт)**: `u32 id`, `f32 x`, `f32 y`, `i16 vx`, `i16 vy` (0.1 пкс/с), `i16 angle` (1/1000 рад), `u8 flags` (`size | hunter`).
-- **Запис кулі (21 байт)**: `u32 id`, `f32 x`, `f32 y`, `i16 vx`, `i16 vy` (0.1 пкс/с), `u32 owner`, `u8 flags` (`missile`).
-- **Запис бонусу (14 байт)**: `u32 id`, `f32 x`, `f32 y`, `u8 effect`, `u8 remaining` (с).
-- **Запис події вибуху (11 байт)**: `u8 type`, `u8 kind`, `u8 size`, `f32 x`, `f32 y`.
-
-## Порівняння JSON vs Binary (`DataView`)
-
-Виміряно скриптом `npm run bench --workspace=@dogfight/shared` (Node.js, 10 000 ітерацій, реальна сцена: **4 гравці, 30 Гц**, 4 судна, 3 астероїди, 15 куль, 1 бонус):
-
-| Формат                  | Bytes / snapshot |   Bytes / input | KB/s down (1 гравець / 4 гравці) | KB/s up (1 гравець / 4 гравці) | Encode + Decode (µs) |
-| ----------------------- | ---------------: | --------------: | -------------------------------: | -----------------------------: | -------------------: |
-| **JSON**                |          2 606 B |           267 B |              76.35 / 305.39 KB/s |              7.82 / 31.29 KB/s |              27.7 µs |
-| **Binary (`DataView`)** |        **533 B** |        **21 B** |           **15.62 / 62.46 KB/s** |           **0.62 / 2.46 KB/s** |           **4.2 µs** |
-| **Виграш Binary**       |   **4.9× менше** | **12.7× менше** |               **−79.5% трафіку** |             **−92.1% трафіку** |      **6.6× швидше** |
-
-## Архітектура Netcode
-
-Мережевий екшн реального часу розв'язує три фундаментальні проблеми, які суперечать одна одній:
-
-1. **Затримка (Latency).** Між натисканням клавіші й відповіддю сервера минає `RTT` (40–250 мс). Чекати підтвердження сервера перед поворотом або пострілом неможливо — керування відчуватиметься «киселем». У Dogfight локальне судно реагує **миттєво** завдяки **Client-Side Prediction**: клієнт виконує той самий крок фізики з `@dogfight/shared` на частоті 30 Гц, локально породжує власні кулі (поки їхній `seq` не підтверджено сервером) і паралельно відправляє команду вводу із `seq` та 3 попередніми командами (надлишковість маскує поодинокі втрати пакетів).
-2. **Консистентність (Consistency).** Усі гравці мають бачити узгоджений світ, попри те, що кожен клієнт іде попереду сервера на `~RTT/2`, а чужі пакети приходять із джиттером. Сервер веде єдиний авторитативний `World` у точному циклі **30 Гц** через `setTimeout` до абсолютного часу `nextTick += 1000 / 30` (без накопичувального дрейфу `setInterval`) і розсилає кожному клієнту знімок із його `lastProcessedSeq`.
-3. **Захист від читерства (Anti-Cheat).** Клієнт ніколи не передає координати, швидкість чи влучання — лише наміри `{ seq, tick, thrust, turn, fire }`. Сервер перевіряє межі (`validateInput`: `|turn| ≤ 1`, валідні прапорці, `tick` не в майбутньому), знімає **рівно одну** команду за тік (захист від спід-хаку), обмежує частоту пакетів (`TokenBucket`) і сам рахує всі зіткнення, шкоду, перезарядку та очки.
-
-### Як працює Server Reconciliation і чому критичний детермінізм
-
-Щоразу, коли надходить серверний `SNAPSHOT`, клієнт виконує звірку для свого судна:
-
-1. Відкидає з буфера всі підтверджені команди (`seq <= lastProcessedSeq`) і прибирає відповідні локальні кулі (їх замінюють серверні).
-2. Ставить у локальний корабель авторитативний стан із сервера (`syncPlayerShip`).
-3. Повторно програє (`replay`) всі неподтверджені команди, що залишилися в буфері, із фіксованим кроком `TICK_DT = 1/30` с.
-4. Різницю між старою візуальною позицією і новою скоригованою додає до `smoothOffset`, який експоненційно згасає за **~100 мс** (`τ = 45 мс`), а при великому стрибку (респаун, >160 пкс) робить миттєвий snap.
-
-**Детермінізм** (`@dogfight/shared` без `Math.random`, `Date.now`, DOM і `node:*`, із `mulberry32` і однаковим `TICK_DT`) гарантує, що за відсутності несподіваних зовнішніх зіткнень повторне програвання дає **нульову** похибку коррекції — корабель не смикається навіть при 150 мс затримки.
-
-### Компроміс вибору `interpolationDelay`
-
-Чужі судна, астероїди й серверні кулі рендеряться **в минулому** (`renderTime = now - interpolationDelay`) шляхом інтерполяції між двома сусідніми знімками з буфера (з урахуванням тороїдального wrap-around через `wrappedDelta` і `lerpAngle`):
-
-- **Замалий `interpolationDelay` (< 33–50 мс на 30 Гц):** за будь-якого джиттера чи втрати одного знімка буфер вичерпується, клієнт змушений екстраполювати, і чужі кораблі починають «телепортуватися» або смикатися.
-- **Завеликий `interpolationDelay` (> 150–200 мс):** рух ідеально плавний, але гравець бачить супротивників із відчутним відставанням у часі, що ускладнює прицілювання.
-- **Оптимальний баланс для 30 Гц (~33.3 мс між знімками):** **66–100 мс** (за замовчуванням **80 мс**, тобто 2–3 інтервали знімків). Це покриває один втрачений пакет або помірний джиттер без помітного лагу; повзунок у Netgraph (`Tab` / `F3`) дозволяє перевірити цей компроміс наживо.
-
-## Структура знімка `Lab_5` та якість коду
-
-У `JavaScript_Labs/Lab_5` зберігається повний знімок монорепозиторію (`package.json`, `package-lock.json`, `shared/`, `client/` із зібраним `client/dist/`, `server/`, `scripts/`, конфіги, `.env.example`, `README.md`) без `node_modules/`, `logs/` і `.DS_Store`.
-
-- `npm test`: **184 тести пройдено** (`shared`: 29, `server`: 122 + 1 skipped на Windows без прав на симлінки, `client`: 33).
-- `npm run lint`: 0 помилок, 0 попереджень.
-- `npm run build --workspace=client`: чиста збірка з `base: './'`, працює як через Node-сервер, так і по `file://`.
-- Кодування всіх файлів: **UTF-8 без BOM, LF**.
+- `npm run typecheck`: **0 помилок** (`@dogfight/shared`, `dogfight-server`, `dogfight-client`).
+- `npm run lint` & `npm run format:check`: **0 помилок, 0 попереджень**.
+- **0 `any`** у всьому проєкті; лише **3** приведення `as` у всій кодовій базі (`asEntityId`, `asTick`, `asSeq` у `shared/src/types.ts`, кожне з коментарем-обґрунтуванням).
+- `npm test`: **155 тестів пройдено, 0 провалено** (`shared`: 27, `server`: 94 + 1 skipped на Windows без прав на symlink, `client`: 34).
+- `npm run build --workspace=client`: чиста збірка з `base: './'` у `client/dist/`.
+- Знімок `JavaScript_Labs/Lab_6` містить повну структуру монорепозиторію (включно з `tsconfig.base.json`, `.github/`, `client/dist/`) без `node_modules/`, `logs/` і `.DS_Store`.
 
 ---
 
 ## Prove It To Yourself — Результати експериментів
 
-_Усі заміри виконано в Node.js `v26.13.1` на цільовій машині (x86_64, Little-Endian)._
+_Перевірено на `TypeScript 6.0.3` (`strict`, `noUncheckedIndexedAccess`, `erasableSyntaxOnly`) та `Node.js v26.13.1`._
 
-### 1. Порядок байтів (Endianness) у `DataView` для `Float32(1.5)`
+### 1. Excess Property Check (змінна проти свіжого літерала)
 
-```text
-DataView.setFloat32(0, 1.5, true)  [LE] -> [ 0, 0, 192, 63 ]   (0x00 0x00 0xC0 0x3F)
-DataView.setFloat32(0, 1.5, false) [BE] -> [ 63, 192, 0, 0 ]   (0x3F 0xC0 0x00 0x00)
+```ts
+type Vec = { x: number };
+const obj = { x: 1, y: 2 };
+const a: Vec = obj; // OK — структурна сумісність
+const b: Vec = { x: 1, y: 2 }; // TS2353: Object literal may only specify known properties, and 'y' does not exist in type 'Vec'.
 ```
 
-**Висновок:** представлення `1.5` у форматі IEEE 754 (`0x3FC00000`) дзеркально змінюється при перемиканні прапорця `littleEndian`. У бінарному кодеку `@dogfight/shared` прапорець `true` (little-endian) задається явно в усіх викликах `DataView`.
+**Висновок:** TypeScript виявляє друкарські помилки у полях при передачі свіжого об'єктного літерала напряму, але допускає структурний підтип через змінну.
 
-### 2. Залежність TypedArray від CPU-endian
+### 2. Звуження `Map.get()` під `strict`
 
-```text
-new Uint16Array(new Uint8Array([1, 0, 0, 1]).buffer) -> [ 1, 256 ]
-```
+`Map<string, Ship>.get(id)` повертає `Ship | undefined`:
 
-**Висновок:** `Uint16Array` інтерпретує буфер у нативному порядку байтів процесора (`[1, 0]` = `1`, `[0, 1]` = `256` на x86_64 LE; на Big-Endian CPU ті самі байти дали б `[256, 1]`). Тому мережевий протокол має використовувати `DataView`, а не пряме приведення через `Uint16Array`/`Float32Array`.
+- `ship!.hp` — небезпечний non-null assertion (приховує можливий `TypeError` у рантаймі);
+- `const hp = ship?.hp ?? 0` — безпечне значення за замовчуванням;
+- `if (ship !== undefined) { ship.hp ... }` — рекомендоване звуження типу (control-flow narrowing).
 
-### 3. Розмір пакета: `JSON.stringify` проти `DataView` (8 кораблів)
+### 3. Вичерпний `switch` із `never` (`assertNever`)
 
-| Формат                                       | Розмір кадру |        Економія |
-| -------------------------------------------- | -----------: | --------------: |
-| `JSON.stringify` (8 кораблів)                |    **613 B** |           1.00× |
-| Binary `DataView` (5 B заголовок + 8 × 21 B) |    **173 B** | **3.54× менше** |
-
-### 4. Джитер і дрейф `setInterval(..., 33)` проти абсолютного `setTimeout` (`nextTick += 1000/30`, 2 с)
-
-| Таймер (2 секунди, ціль 60 тиків) | Тиків | Підсумковий дрейф | Макс. `|дрейф|` |
-| --- | ---: | ---: | ---: |
-| `setInterval(..., 33)` | 43 | **576.82 ms** | **576.82 ms** |
-| Абсолютний `setTimeout` (`next += 33.333`) | **60** | **7.85 ms** | **21.92 ms** |
-
-**Висновок:** `setInterval(33)` накопичує похибку кроку й квантування таймера ОС, втрачаючи 17 тиків за 2 секунди. Самокоригувальний `setTimeout` з абсолютним розкладом тримає рівно 60 тиків за 2 с (30 Гц).
-
-### 5. Детермінізм симуляції на 1 000 кроків (`mulberry32` vs `Math.random()`)
+При додаванні нового варіанта до discriminated union (наприклад, `{ type: 'shutdown' }`) без обробки гілки у `switch`:
 
 ```text
-mulberry32 (run1 vs run2): 8d7099e2 === 8d7099e2  (біт-в-біт ідентично)
-Math.random (rand1 vs rand2): a8fdec5a !== 82d45196 (розходження)
+TS2322: Type '{ type: "shutdown"; reason?: string | undefined; }' is not assignable to type 'never'.
 ```
 
-**Висновок:** заміна `Math.random()` на seeded PRNG (`mulberry32`) і фіксований `dt` гарантує збіг клієнтського передбачення та авторитативного сервера.
+**Висновок:** `const _exhaustive: never = msg` перетворює пропущений обробник протоколу з тихого бага на помилку компіляції.
+
+### 4. Межа довіри `JSON.parse()` → `unknown` → `zod.safeParse()`
+
+`JSON.parse()` у рантаймі може повернути будь-який тип; приведення через `as ClientMessage` обманює компілятор. У `@dogfight/shared` вхідні кадри проходять через `ClientMessageSchema.safeParse(raw)` — тип `ClientMessage` видається лише після реальної валідації всіх полів і діапазонів.
+
+### 5. Нативний запуск `enum` у Node.js v26 проти `as const` union
+
+Фактичний вивід `node -e "enum Dir { Left, Right }"` на `Node.js v26.13.1`:
+
+```text
+enum Dir { Left, Right }
+^^^^
+TypeScript enum is not supported in strip-only mode
+SyntaxError: Unexpected reserved word
+```
+
+**Висновок:** Node.js v26 виконує `.ts` напряму через type-stripping (видалення типів без кодогенерації), тому нестирані конструкції (`enum`, `namespace`, parameter properties) заборонені прапорцем `erasableSyntaxOnly: true` і замінені на `as const` об'єкти + union-типи (`MsgType`, `CloseCode`, `Kind`).

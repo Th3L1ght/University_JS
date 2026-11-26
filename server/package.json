@@ -1,20 +1,22 @@
 {
   "name": "dogfight-server",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "private": true,
   "type": "module",
-  "description": "Dogfight server: node:http + ws, rooms, NDJSON match logs",
-  "main": "src/index.js",
+  "description": "Dogfight server: TypeScript + node:http + ws, rooms, authoritative match, NDJSON logs",
+  "main": "src/index.ts",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
-    "test": "node --test \"test/*.test.js\""
+    "typecheck": "tsc -p tsconfig.json",
+    "start": "node src/index.ts",
+    "dev": "node --watch src/index.ts",
+    "test": "node --test \"test/*.test.ts\""
   },
   "dependencies": {
     "@dogfight/shared": "*",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^4.6.7"
   }
 }

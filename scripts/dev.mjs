@@ -13,7 +13,7 @@ const isWindows = process.platform === 'win32';
 const npmCommand = isWindows ? 'npm.cmd' : 'npm';
 
 const children = [
-  spawn(process.execPath, ['--watch', '--env-file-if-exists=.env', 'server/src/index.js'], {
+  spawn(process.execPath, ['--watch', '--env-file-if-exists=.env', 'server/src/index.ts'], {
     stdio: 'inherit',
     env: { ...process.env, NODE_ENV: 'development' },
   }),

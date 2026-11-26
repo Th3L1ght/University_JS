@@ -1,9 +1,9 @@
 {
   "name": "dogfight",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "private": true,
   "type": "module",
-  "description": "Dogfight: Lab 5 - Real-Time Networking (authoritative server, prediction, binary protocol)",
+  "description": "Dogfight: Lab 6 - Strict TypeScript across shared, server, and client",
   "workspaces": [
     "client",
     "server",
@@ -15,8 +15,9 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "npm run build --workspace=client",
-    "start": "node server/src/index.js",
-    "start:env": "node --env-file=.env server/src/index.js",
+    "start": "node server/src/index.ts",
+    "start:env": "node --env-file=.env server/src/index.ts",
+    "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm test --workspaces --if-present",
     "assets:generate": "npm run assets:generate --workspace=client",
     "lint": "eslint .",
@@ -25,9 +26,13 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.11",
+    "@types/ws": "^8.18.2",
     "eslint": "^10.15.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.14.0",
-    "prettier": "^3.10.1"
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.74.0"
   }
 }

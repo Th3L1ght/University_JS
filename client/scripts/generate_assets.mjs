@@ -7,10 +7,10 @@
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { buildManifest, SOUND_IDS, SPRITE_SHEETS } from '../src/assets/atlas.js';
-import { buildSpriteSheetSvg } from '../src/assets/sprite_art.js';
-import { SOUND_SAMPLE_RATE, synthSound } from '../src/assets/sound_synth.js';
-import { DEFAULT_ARENA, DEFAULT_ROOMS } from '../src/assets/defaults.js';
+import { buildManifest, SOUND_IDS, SPRITE_SHEETS } from '../src/assets/atlas.ts';
+import { buildSpriteSheetSvg } from '../src/assets/sprite_art.ts';
+import { SOUND_SAMPLE_RATE, synthSound } from '../src/assets/sound_synth.ts';
+import { DEFAULT_ARENA, DEFAULT_ROOMS } from '../src/assets/defaults.ts';
 
 const publicDir = new URL('../public/', import.meta.url);
 

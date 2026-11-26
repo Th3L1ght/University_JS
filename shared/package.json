@@ -1,19 +1,23 @@
 {
   "name": "@dogfight/shared",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "private": true,
   "type": "module",
-  "description": "Dogfight shared: детермінована симуляція, протокол і кодеки (без DOM і node:*)",
-  "main": "src/index.js",
+  "description": "Dogfight shared: суворо типізована детермінована симуляція, Zod-протокол і кодеки",
+  "main": "src/index.ts",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.ts"
   },
   "sideEffects": false,
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.js\"",
-    "bench": "node scripts/bench_codec.mjs"
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"test/*.test.ts\"",
+    "bench": "node scripts/bench_codec.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
   }
 }
